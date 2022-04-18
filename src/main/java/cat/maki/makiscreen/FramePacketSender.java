@@ -13,8 +13,8 @@ import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.scheduler.BukkitRunnable;
 
 import net.minecraft.network.protocol.game.ClientboundMapItemDataPacket;
-import net.minecraft.world.level.saveddata.maps.WorldMap.b;
-import net.minecraft.server.network.PlayerConnection;
+import net.minecraft.world.level.saveddata.maps.MapItemSavedData.MapPatch;
+import net.minecraft.server.network.ServerGamePacketListenerImpl;
 
 class FramePacketSender extends BukkitRunnable implements Listener, org.bukkit.event.Listener {
   private long frameNumber = 0;
@@ -33,8 +33,8 @@ class FramePacketSender extends BukkitRunnable implements Listener, org.bukkit.e
     if (buffers == null) {
       return;
     }
-    List<PacketPlayOutMap> packets = new ArrayList<>(MakiScreen.screens.size());
-    for (ScreenPart screenPart : MakiScreen.screens) {
+    List<ClientboundMapItemDataPacket> packets = new ArrayList<>(plugin.getScreens().size());
+    for (ScreenPart screenPart : plugin.getScreens()) {
       byte[] buffer = buffers[screenPart.partId];
       if (buffer != null) {
         ClientboundMapItemDataPacket packet = getPacket(screenPart.mapId, buffer);
@@ -69,8 +69,8 @@ class FramePacketSender extends BukkitRunnable implements Listener, org.bukkit.e
     new BukkitRunnable() {
       @Override
       public void run() {
-        List<PacketPlayOutMap> packets = new ArrayList<>();
-        for (ScreenPart screenPart : MakiScreen.screens) {
+        List<ClientboundMapItemDataPacket> packets = new ArrayList<>();
+        for (ScreenPart screenPart : plugin.getScreens()) {
           if (screenPart.lastFrameBuffer != null) {
             packets.add(getPacket(screenPart.mapId, screenPart.lastFrameBuffer));
           }
@@ -80,21 +80,21 @@ class FramePacketSender extends BukkitRunnable implements Listener, org.bukkit.e
     }.runTaskLater(plugin, 10);
   }
 
-  private void sendToPlayer(Player player, List<PacketPlayOutMap> packets) {
-    final PlayerConnection connection = ((CraftPlayer) player).getHandle().b;
-    for (PacketPlayOutMap packet : packets) {
+  private void sendToPlayer(Player player, List<ClientboundMapItemDataPacket> packets) {
+    final ServerGamePacketListenerImpl connection = ((CraftPlayer) player).getHandle().connection;
+    for (ClientboundMapItemDataPacket packet : packets) {
       if (packet != null) {
-        connection.a(packet);
+        connection.send(packet);
       }
     }
   }
 
-  private PacketPlayOutMap getPacket(int mapId, byte[] data) {
+  private ClientboundMapItemDataPacket getPacket(int mapId, byte[] data) {
     if (data == null) {
       throw new NullPointerException("data is null");
     }
-    return new PacketPlayOutMap(
+    return new ClientboundMapItemDataPacket(
         mapId, (byte) 0, false, null,
-        new b(0, 0, 128, 128, data));
+        new MapPatch(0, 0, 128, 128, data));
   }
 }
