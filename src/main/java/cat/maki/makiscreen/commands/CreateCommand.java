@@ -18,9 +18,11 @@ public class CreateCommand extends ECommand {
     MakiScreen plugin = MakiScreen.getInstance();
 
     public CreateCommand() {
+        setCommand("create");
         setDefaultHelp();
         setPermission("maki.create");
         setConsoleCommand(false);
+        setPlayerCommand(true);
     }
 
     @Override

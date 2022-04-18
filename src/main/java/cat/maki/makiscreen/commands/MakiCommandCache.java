@@ -6,11 +6,9 @@ import de.erethon.bedrock.plugin.EPlugin;
 public class MakiCommandCache extends ECommandCache {
 
     public static final String LABEL = "maki";
-    EPlugin plugin;
 
     public MakiCommandCache(EPlugin plugin) {
         super(LABEL, plugin);
-        this.plugin = plugin;
         addCommand(new MainCommand());
         addCommand(new CreateCommand());
     }

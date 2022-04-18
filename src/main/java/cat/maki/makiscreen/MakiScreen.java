@@ -1,6 +1,8 @@
 package cat.maki.makiscreen;
 
 import cat.maki.makiscreen.commands.MakiCommandCache;
+import de.erethon.bedrock.compatibility.Internals;
+import de.erethon.bedrock.plugin.EPluginSettings;
 import org.bukkit.Material;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
@@ -28,10 +30,22 @@ public final class MakiScreen extends EPlugin implements Listener {
         Comparator.comparingInt(to -> to.mapId));
     private VideoCapture videoCapture;
 
+
+    public MakiScreen() {
+        settings = EPluginSettings.builder()
+                .internals(Internals.v1_18_R2)
+                .economy(false)
+                .build();
+    }
+
     @Override
     public void onEnable() {
+        super.onEnable();
         instance = this;
         commands = new MakiCommandCache(this);
+        commands.register(this);
+        setCommandCache(commands);
+
         ConfigFile configFile = new ConfigFile(this);
         configFile.run();
 

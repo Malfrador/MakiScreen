@@ -8,6 +8,7 @@ import org.bukkit.command.CommandSender;
 public class MainCommand extends ECommand {
 
     public MainCommand() {
+        setCommand("main");
         setPermission("maki.main");
     }
 
