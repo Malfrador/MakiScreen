@@ -21,7 +21,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  */
-package cat.maki.MakiScreen.dither;
+package cat.maki.makiscreen.dither;
 
 import java.io.Serial;
 import java.util.concurrent.RecursiveTask;

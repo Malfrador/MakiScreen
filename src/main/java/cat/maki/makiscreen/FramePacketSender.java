@@ -1,4 +1,4 @@
-package cat.maki.MakiScreen;
+package cat.maki.makiscreen;
 
 import java.net.http.WebSocket.Listener;
 import java.util.ArrayList;
@@ -6,13 +6,13 @@ import java.util.List;
 import java.util.Queue;
 
 import org.bukkit.Bukkit;
-import org.bukkit.craftbukkit.v1_18_R1.entity.CraftPlayer;
+import org.bukkit.craftbukkit.v1_18_R2.entity.CraftPlayer;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.scheduler.BukkitRunnable;
 
-import net.minecraft.network.protocol.game.PacketPlayOutMap;
+import net.minecraft.network.protocol.game.ClientboundMapItemDataPacket;
 import net.minecraft.world.level.saveddata.maps.WorldMap.b;
 import net.minecraft.server.network.PlayerConnection;
 
@@ -37,7 +37,7 @@ class FramePacketSender extends BukkitRunnable implements Listener, org.bukkit.e
     for (ScreenPart screenPart : MakiScreen.screens) {
       byte[] buffer = buffers[screenPart.partId];
       if (buffer != null) {
-        PacketPlayOutMap packet = getPacket(screenPart.mapId, buffer);
+        ClientboundMapItemDataPacket packet = getPacket(screenPart.mapId, buffer);
         if (!screenPart.modified) {
           packets.add(0, packet);
         } else {

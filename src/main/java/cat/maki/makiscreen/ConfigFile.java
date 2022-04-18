@@ -1,4 +1,4 @@
-package cat.maki.MakiScreen;
+package cat.maki.makiscreen;
 
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.plugin.Plugin;

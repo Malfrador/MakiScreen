@@ -1,4 +1,4 @@
-package cat.maki.MakiScreen;
+package cat.maki.makiscreen;
 
 import com.google.common.collect.EvictingQueue;
 import org.bukkit.scheduler.BukkitRunnable;
@@ -7,8 +7,8 @@ import java.awt.image.BufferedImage;
 import java.awt.image.DataBufferByte;
 import java.util.Queue;
 
-import static cat.maki.MakiScreen.dither.DitherLookupUtil.COLOR_MAP;
-import static cat.maki.MakiScreen.dither.DitherLookupUtil.FULL_COLOR_MAP;
+import static cat.maki.makiscreen.dither.DitherLookupUtil.COLOR_MAP;
+import static cat.maki.makiscreen.dither.DitherLookupUtil.FULL_COLOR_MAP;
 
 class FrameProcessorTask extends BukkitRunnable {
 

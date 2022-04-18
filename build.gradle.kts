@@ -15,8 +15,7 @@ plugins {
 }
 
 group = "cat.maki.makiscreen"
-version = "1.0.0-SNAPSHOT"
-description = "Quest plugin for erethon"
+version = "1.1.1"
 
 java {
     toolchain.languageVersion.set(JavaLanguageVersion.of(17))
@@ -24,7 +23,7 @@ java {
 
 dependencies {
     paperDevBundle("1.18.2-R0.1-SNAPSHOT")
-    implementation("de.erethon:bedrock:1.2.0") { isTransitive = false }
+    implementation("de.erethon:bedrock:1.2.1") { isTransitive = false }
 }
 
 tasks {
@@ -52,7 +51,7 @@ tasks {
     }
     bukkit {
         load = BukkitPluginDescription.PluginLoadOrder.STARTUP
-        main = "cat.maki.MakiScreen.MakiScreen"
+        main = "cat.maki.makiscreen.MakiScreen"
         apiVersion = "1.18"
         authors = listOf("Maki")
         commands {

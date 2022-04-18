@@ -1,4 +1,4 @@
-package cat.maki.MakiScreen;
+package cat.maki.makiscreen;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;

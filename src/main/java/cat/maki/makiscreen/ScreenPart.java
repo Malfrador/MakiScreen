@@ -1,4 +1,4 @@
-package cat.maki.MakiScreen;
+package cat.maki.makiscreen;
 
 public class ScreenPart {
   public static final int WIDTH = 128;

@@ -1,4 +1,4 @@
-package cat.maki.MakiScreen;
+package cat.maki.makiscreen;
 
 import org.bukkit.Bukkit;
 import org.bukkit.configuration.file.FileConfiguration;
@@ -28,6 +28,7 @@ import java.util.logging.Level;
 public class ImageManager implements Listener {
 
     private static ImageManager instance = null;
+    private MakiScreen plugin = MakiScreen.getInstance();
 
     public static ImageManager getInstance() {
         if (instance == null)
@@ -64,7 +65,7 @@ public class ImageManager implements Listener {
                 view.removeRenderer(renderer);
             view.setScale(Scale.CLOSEST);
             view.setTrackingPosition(false);
-            MakiScreen.screens.add(new ScreenPart(view.getId(), getImage(view.getId())));
+            plugin.getScreens().add(new ScreenPart(view.getId(), getImage(view.getId())));
         }
     }
 
