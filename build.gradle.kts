@@ -25,6 +25,8 @@ dependencies {
     paperDevBundle("1.19.2-R0.1-SNAPSHOT")
     implementation("de.erethon:bedrock:1.2.1") { isTransitive = false }
     implementation("com.github.sealedtx:java-youtube-downloader:3.1.0")
+    implementation("org.bytedeco:javacv-platform:1.5.7")
+    implementation("org.bytedeco:ffmpeg-platform:5.0-1.5.7")
 }
 
 tasks {
@@ -47,8 +49,11 @@ tasks {
     shadowJar {
         dependencies {
             include(dependency("de.erethon:bedrock:1.2.1"))
+            include(dependency("org.bytedeco::1.5.7"))
+            include(dependency("org.bytedeco::5.0-1.5.7"))
         }
         relocate("de.erethon.bedrock", "cat.maki.makiscreen.bedrock")
+        //relocate("org.bytedeco::1.5.7", "cat.maki.makiscreen.javacv")
     }
     bukkit {
         load = BukkitPluginDescription.PluginLoadOrder.STARTUP

@@ -1,11 +1,13 @@
 package cat.maki.makiscreen;
 
 import cat.maki.makiscreen.commands.MakiCommandCache;
+import de.erethon.bedrock.chat.MessageUtil;
 import de.erethon.bedrock.compatibility.Internals;
 import de.erethon.bedrock.plugin.EPlugin;
 import de.erethon.bedrock.plugin.EPluginSettings;
 import org.bukkit.event.Listener;
 
+import java.io.File;
 import java.util.Comparator;
 import java.util.Set;
 import java.util.TreeSet;
@@ -20,6 +22,7 @@ public final class MakiScreen extends EPlugin implements Listener {
     private Set<ScreenPart> screens = new TreeSet<>(
         Comparator.comparingInt(to -> to.mapId));
     private VideoCapture videoCapture;
+    private OpenCVFrameGrabber grabber;
 
 
     public MakiScreen() {
@@ -57,17 +60,17 @@ public final class MakiScreen extends EPlugin implements Listener {
         int mapSize = ConfigFile.getMapSize();
         int mapWidth = ConfigFile.getMapWidth();
 
-        videoCapture = new VideoCapture(this,
+       /*videoCapture = new VideoCapture(this,
                 ConfigFile.getVCWidth(),
                 ConfigFile.getVCHeight()
         );
-        videoCapture.start();
+        videoCapture.start();*/
+        grabber = new OpenCVFrameGrabber(new File(getDataFolder() + "/video.mp4"), mapSize, mapWidth);
+        grabber.prepare();
+        //grabber.runTaskTimerAsynchronously(this, 0, 1);
 
-        FrameProcessorTask frameProcessorTask = new FrameProcessorTask(mapSize, mapWidth);
-        frameProcessorTask.runTaskTimerAsynchronously(this, 0, 1);
-        FramePacketSender framePacketSender =
-            new FramePacketSender(this, frameProcessorTask.getFrameBuffers());
-        framePacketSender.runTaskTimerAsynchronously(this, 0, 1);
+        //FrameProcessorTask frameProcessorTask = new FrameProcessorTask(mapSize, mapWidth);
+        //frameProcessorTask.runTaskTimerAsynchronously(this, 0, 1);
     }
 
     @Override
@@ -84,4 +87,7 @@ public final class MakiScreen extends EPlugin implements Listener {
         return instance;
     }
 
+    public OpenCVFrameGrabber getGrabber() {
+        return grabber;
+    }
 }

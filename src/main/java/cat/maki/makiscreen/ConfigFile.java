@@ -56,6 +56,12 @@ public class ConfigFile extends BukkitRunnable {
                 VCWidth = 128 * 8;
                 VCHeight = 128 * 4;
             }
+            case 4 -> {
+                mapSize = 64;
+                mapWidth = 16;
+                VCWidth = 128 * 16;
+                VCHeight = 128 * 8;
+            }
         }
 
     }
