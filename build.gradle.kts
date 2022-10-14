@@ -22,8 +22,9 @@ java {
 }
 
 dependencies {
-    paperDevBundle("1.18.2-R0.1-SNAPSHOT")
+    paperDevBundle("1.19.2-R0.1-SNAPSHOT")
     implementation("de.erethon:bedrock:1.2.1") { isTransitive = false }
+    implementation("com.github.sealedtx:java-youtube-downloader:3.1.0")
 }
 
 tasks {
@@ -52,8 +53,8 @@ tasks {
     bukkit {
         load = BukkitPluginDescription.PluginLoadOrder.STARTUP
         main = "cat.maki.makiscreen.MakiScreen"
-        apiVersion = "1.18"
-        authors = listOf("Maki")
+        apiVersion = "1.19"
+        authors = listOf("Maki", "Malfrador")
         commands {
             register("maki") {
                 description = "Does things!"

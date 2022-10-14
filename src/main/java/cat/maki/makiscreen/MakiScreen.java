@@ -2,18 +2,9 @@ package cat.maki.makiscreen;
 
 import cat.maki.makiscreen.commands.MakiCommandCache;
 import de.erethon.bedrock.compatibility.Internals;
-import de.erethon.bedrock.plugin.EPluginSettings;
-import org.bukkit.Material;
-import org.bukkit.command.Command;
-import org.bukkit.command.CommandSender;
-import org.bukkit.entity.Player;
-import org.bukkit.event.Listener;
-import org.bukkit.inventory.ItemStack;
-import org.bukkit.inventory.meta.MapMeta;
-import org.bukkit.map.MapRenderer;
-import org.bukkit.map.MapView;
 import de.erethon.bedrock.plugin.EPlugin;
-import org.jetbrains.annotations.NotNull;
+import de.erethon.bedrock.plugin.EPluginSettings;
+import org.bukkit.event.Listener;
 
 import java.util.Comparator;
 import java.util.Set;
