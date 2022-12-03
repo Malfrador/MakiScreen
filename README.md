@@ -1,4 +1,4 @@
-WIP-Fork of [MakiScreen](https://github.com/makifoxgirl/MakiScreen) that adds local playback, audio and high framerate video. 
+WIP-Fork of [MakiScreen](https://github.com/makifoxgirl/MakiScreen) that adds local playback, audio, and high framerate video. 
 
 ### Improvements
 * Use local video files instead of reading a ffmpeg stream. Not needing to run FFMPEG improves performance as well.
