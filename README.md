@@ -5,4 +5,5 @@ WIP-Fork of [MakiScreen](https://github.com/makifoxgirl/MakiScreen) that adds lo
 * Framerate is independent from server tick-rate and can be higher than 20 FPS.
 * Plays back audio using an automatically generated resource pack.
 * Automatically up- or downscale video to fit the map screen.
+
 See the original [MakiScreen](https://github.com/makifoxgirl/MakiScreen) repository for a video demo.
