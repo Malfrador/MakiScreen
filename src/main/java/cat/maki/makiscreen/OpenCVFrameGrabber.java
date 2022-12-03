@@ -2,6 +2,7 @@ package cat.maki.makiscreen;
 
 import com.google.common.collect.EvictingQueue;
 import de.erethon.bedrock.chat.MessageUtil;
+import net.minecraft.FileUtil;
 import net.minecraft.network.protocol.game.ClientboundMapItemDataPacket;
 import net.minecraft.server.network.ServerGamePacketListenerImpl;
 import net.minecraft.world.level.saveddata.maps.MapItemSavedData;
@@ -16,33 +17,35 @@ import org.bytedeco.ffmpeg.global.avcodec;
 import org.bytedeco.javacv.FFmpegFrameGrabber;
 import org.bytedeco.javacv.FFmpegFrameRecorder;
 import org.bytedeco.javacv.Frame;
-import org.bytedeco.javacv.FrameGrabber;
 import org.bytedeco.javacv.FrameRecorder;
 import org.bytedeco.javacv.Java2DFrameConverter;
 
-import javax.imageio.ImageIO;
 import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.awt.image.DataBufferByte;
-import java.io.ByteArrayInputStream;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.file.CopyOption;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 import static cat.maki.makiscreen.dither.DitherLookupUtil.COLOR_MAP;
 import static cat.maki.makiscreen.dither.DitherLookupUtil.FULL_COLOR_MAP;
 
-public class OpenCVFrameGrabber extends BukkitRunnable implements Listener {
+public class OpenCVFrameGrabber implements Listener, Runnable {
 
     private final MakiScreen plugin = MakiScreen.getInstance();
 
     public File videoFile;
     FFmpegFrameGrabber grabber;
     public static BufferedImage currentFrame;
-    private int skipCounter = 0;
-    public int skippy = 5;
 
     private final Object lock = new Object();
     private final Queue<byte[][]> frameBuffers = EvictingQueue.create(450);
@@ -89,11 +92,6 @@ public class OpenCVFrameGrabber extends BukkitRunnable implements Listener {
                 return;
             }
             if (frame.image == null) {
-                return;
-            }
-            skipCounter++;
-            if (skipCounter >= skippy) { // Skip every 5th frame to get to 20 fps
-                skipCounter = 0;
                 return;
             }
             Java2DFrameConverter c = new Java2DFrameConverter();
@@ -147,45 +145,31 @@ public class OpenCVFrameGrabber extends BukkitRunnable implements Listener {
         }
     }
 
-    public void preprocess(File file) {
-        FFmpegFrameGrabber preGrabber = new FFmpegFrameGrabber(file);
-        try {
-            preGrabber.start();
-        } catch (FFmpegFrameGrabber.Exception e) {
-            throw new RuntimeException(e);
+    public void preprocess(File file) throws FrameRecorder.Exception, FFmpegFrameGrabber.Exception {
+        File extractAudioFile = new File(MakiScreen.getInstance().getDataFolder() + "/processed.ogg");
+        if (extractAudioFile.exists()) {
+            extractAudioFile.delete();
         }
-        int skipCounter = 0;
-        FFmpegFrameRecorder recorder = new FFmpegFrameRecorder(new File(MakiScreen.getInstance().getDataFolder() + "/processed.mp4"), preGrabber.getImageWidth(), preGrabber.getImageWidth());
-        recorder.setVideoCodec(preGrabber.getVideoCodec());
-        recorder.setFormat(preGrabber.getFormat());
-        recorder.setAudioChannels(preGrabber.getAudioChannels());
-        recorder.setAudioCodec(preGrabber.getAudioCodec());
-        recorder.setSampleRate(preGrabber.getSampleRate());
-        recorder.setAudioBitrate(preGrabber.getAudioBitrate());
-        recorder.setFrameRate(20);
-        recorder.setVideoBitrate(preGrabber.getVideoBitrate());
-        recorder.setVideoCodec(preGrabber.getVideoCodec());
-        try {
-            recorder.start();
-        } catch (FFmpegFrameRecorder.Exception e) {
-            throw new RuntimeException(e);
+        FFmpegFrameRecorder recorder = new FFmpegFrameRecorder(extractAudioFile, 2);
+        recorder.setAudioQuality(100);
+        recorder.setAudioBitrate(192000);
+        recorder.setSampleRate(44100);
+        // minecraft needs vorbis .ogg audio files
+        recorder.setAudioCodec(avcodec.AV_CODEC_ID_VORBIS);
+        recorder.start();
+        FFmpegFrameGrabber grabber = FFmpegFrameGrabber.createDefault(file);
+        grabber.start();
+        Frame f;
+        while ((f = grabber.grabSamples()) != null) {
+            recorder.record(f);
         }
+        grabber.stop();
+        recorder.close();
+        // We might want to split the sound into multiple files (every 5-10 seconds maybe?) so the audio can be paused and resumed. Might necessitate some form of overlap
+        File resourcePack = new File(MakiScreen.getInstance().getDataFolder() + "/resourcepack/assets/maki/sounds/audio.ogg");
         try {
-            while (true) {
-                Frame frame = preGrabber.grab();
-                if (frame == null) {
-                    break;
-                }
-                MessageUtil.broadcastActionBarMessage("Processing frame " + preGrabber.getFrameNumber() + " of " + preGrabber.getLengthInFrames());
-                skipCounter++;
-                if (skipCounter >= 5) { // Skip every 5th frame to get to 20 fps
-                    skipCounter = 0;
-                    continue;
-                }
-                recorder.record(frame);
-            }
-        }
-        catch (Exception e) {
+            Files.move(extractAudioFile.toPath(), resourcePack.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        } catch (IOException e) {
             throw new RuntimeException(e);
         }
     }
@@ -360,6 +344,50 @@ public class OpenCVFrameGrabber extends BukkitRunnable implements Listener {
         return new ClientboundMapItemDataPacket(
                 mapId, (byte) 0, false, null,
                 new MapItemSavedData.MapPatch(0, 0, 128, 128, data));
+    }
+
+
+    public static void generateZip() {
+        try {
+            File file = new File(MakiScreen.getInstance().getDataFolder(), "resourcepack");
+            FileOutputStream fileOutputStream = new FileOutputStream(MakiScreen.getInstance().getDataFolder() + "/resourcepack.zip");
+            ZipOutputStream zipOutputStream = new ZipOutputStream(fileOutputStream);
+            File[] arrayOfFile = file.listFiles();
+            if (arrayOfFile == null)
+                return;
+            for (File file1 : arrayOfFile)
+                zipFile(file1, file1.getName(), zipOutputStream);
+            zipOutputStream.close();
+            fileOutputStream.close();
+        } catch (IOException iOException) {
+            iOException.printStackTrace();
+        }
+    }
+
+    private static void zipFile(File paramFile, String paramString, ZipOutputStream paramZipOutputStream) throws IOException {
+        if (paramFile.isHidden())
+            return;
+        if (paramFile.isDirectory()) {
+            if (paramString.endsWith("/")) {
+                paramZipOutputStream.putNextEntry(new ZipEntry(paramString));
+            } else {
+                paramZipOutputStream.putNextEntry(new ZipEntry(paramString + "/"));
+            }
+            paramZipOutputStream.closeEntry();
+            File[] arrayOfFile = paramFile.listFiles();
+            if (arrayOfFile != null)
+                for (File file : arrayOfFile)
+                    zipFile(file, paramString + "/" + file.getName(), paramZipOutputStream);
+            return;
+        }
+        FileInputStream fileInputStream = new FileInputStream(paramFile);
+        ZipEntry zipEntry = new ZipEntry(paramString);
+        paramZipOutputStream.putNextEntry(zipEntry);
+        byte[] arrayOfByte = new byte[1024];
+        int i;
+        while ((i = fileInputStream.read(arrayOfByte)) >= 0)
+            paramZipOutputStream.write(arrayOfByte, 0, i);
+        fileInputStream.close();
     }
 
     @EventHandler

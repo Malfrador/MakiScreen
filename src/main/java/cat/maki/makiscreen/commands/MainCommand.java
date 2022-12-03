@@ -5,8 +5,13 @@ import de.erethon.bedrock.chat.MessageUtil;
 import de.erethon.bedrock.command.ECommand;
 import org.bukkit.command.CommandSender;
 import org.bukkit.scheduler.BukkitRunnable;
+import org.bytedeco.javacv.FFmpegFrameGrabber;
+import org.bytedeco.javacv.FrameRecorder;
 
 import java.io.File;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 public class MainCommand extends ECommand {
 
@@ -34,9 +39,14 @@ public class MainCommand extends ECommand {
             };
             asyncPreprocess.runTaskAsynchronously(plugin);
         } else {*/
-            plugin.getGrabber().skippy = Integer.parseInt(strings[1]);
-            plugin.getGrabber().prepare();
-            plugin.getGrabber().runTaskTimerAsynchronously(MakiScreen.getInstance(), 0, 1);
+        try {
+            plugin.getGrabber().preprocess(new File(plugin.getDataFolder() + "/video.mp4"));
+        } catch (FrameRecorder.Exception | FFmpegFrameGrabber.Exception e) {
+            throw new RuntimeException(e);
+        }
+        plugin.getGrabber().prepare();
+        ScheduledExecutorService scheduledExecutorService = Executors.newScheduledThreadPool(1);
+        scheduledExecutorService.scheduleAtFixedRate(plugin.getGrabber(), 0, Integer.parseInt(strings[1]), TimeUnit.MILLISECONDS);
         //}
 
     }
