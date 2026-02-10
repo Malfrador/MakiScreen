@@ -9,7 +9,23 @@ public class MakiCommandCache extends ECommandCache {
 
     public MakiCommandCache(EPlugin plugin) {
         super(LABEL, plugin);
-        addCommand(new MainCommand());
-        addCommand(new CreateCommand());
+        // Screen management
+        addCommand(new ScreenCreateCommand());
+        addCommand(new DeleteCommand());
+        addCommand(new ListCommand());
+        addCommand(new InfoCommand());
+
+        // Playback control
+        addCommand(new PlayCommand());
+        addCommand(new PauseCommand());
+        addCommand(new ResumeCommand());
+        addCommand(new StopCommand());
+        addCommand(new SeekCommand());
+
+        // Download
+        addCommand(new DownloadCommand());
+
+        // Help
+        addCommand(new HelpCommand());
     }
 }

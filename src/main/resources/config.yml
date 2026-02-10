@@ -1,5 +1,58 @@
-# Set your OBS output resolution according to this option below.
-# 1 = 256x128 = 2 maps
-# 2 = 512x256 = 8 maps
-# 3 = 1024x512 = 32 maps
-size: 2
+# Version 2.0.0
+
+# Performance Settings
+performance:
+  # Maximum packets per tick per player (higher = more bandwidth, smoother video)
+  max-packets-per-tick: 150
+
+  # Number of threads for frame processing
+  processing-threads: 4
+
+  # Enable inter-frame compression (only send changed pixels)
+  # Massively reduces bandwidth at the cost of slight CPU overhead
+  inter-frame-compression: true
+
+  # Minimum changed pixels percentage to send a full map update instead of patch
+  # Lower = more granular updates, Higher = fewer packets
+  full-update-threshold: 75
+
+# Audio Settings
+audio:
+  # Duration of each audio chunk in milliseconds
+  # Smaller = more precise pause/resume, Larger = fewer files
+  chunk-duration-ms: 5000
+
+  # Audio bitrate for extracted audio (higher = better quality, larger files)
+  bitrate: 192000
+
+# Resource Pack Server Settings
+resourcepack:
+  # Enable built-in resource pack server
+  enabled: true
+
+  # Server address (use your server's public IP or domain)
+  # Players must be able to reach this address
+  address: "localhost"
+
+  # Server port
+  port: 8080
+
+  # Automatically send resource pack to players when playing video with audio
+  auto-apply: true
+
+  # Require players to accept the resource pack
+  # If true, players who decline will be kicked
+  required: false
+
+  # Resource pack prompt message (supports MiniMessage format)
+  prompt: "<yellow>This video requires a resource pack for audio playback"
+
+# Default screen settings
+defaults:
+  # Default aspect ratio for new screens
+  # Options: RATIO_16_9, RATIO_21_9, RATIO_4_3, RATIO_1_1, RATIO_2_1
+  aspect-ratio: RATIO_16_9
+
+  # Default map dimensions for new screens (width x height in maps)
+  map-width: 8
+  map-height: 5

@@ -1,16 +1,27 @@
 package cat.maki.makiscreen;
 
 import cat.maki.makiscreen.commands.MakiCommandCache;
-import de.erethon.bedrock.chat.MessageUtil;
+import cat.maki.makiscreen.dither.DitherLookupUtil;
+import cat.maki.makiscreen.download.YoutubeDownloadManager;
+import cat.maki.makiscreen.resourcepack.ResourcePackServer;
+import cat.maki.makiscreen.screen.Screen;
+import cat.maki.makiscreen.screen.ScreenManager;
+import cat.maki.makiscreen.video.PacketDispatcher;
+import cat.maki.makiscreen.video.VideoPlayer;
 import de.erethon.bedrock.compatibility.Internals;
 import de.erethon.bedrock.plugin.EPlugin;
 import de.erethon.bedrock.plugin.EPluginSettings;
+import org.bukkit.Bukkit;
+import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
+import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.scheduler.BukkitRunnable;
 
 import java.io.File;
-import java.util.Comparator;
-import java.util.Set;
-import java.util.TreeSet;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
 
 public final class MakiScreen extends EPlugin implements Listener {
@@ -19,15 +30,14 @@ public final class MakiScreen extends EPlugin implements Listener {
     private static MakiScreen instance;
     private MakiCommandCache commands;
 
-    private Set<ScreenPart> screens = new TreeSet<>(
-        Comparator.comparingInt(to -> to.mapId));
-    private VideoCapture videoCapture;
-    private OpenCVFrameGrabber grabber;
-
+    private ScreenManager screenManager;
+    private ResourcePackServer resourcePackServer;
+    private YoutubeDownloadManager youtubeDownloadManager;
+    private final Map<UUID, VideoPlayer> videoPlayers = new ConcurrentHashMap<>();
 
     public MakiScreen() {
         settings = EPluginSettings.builder()
-                .internals(Internals.v1_18_R2)
+                .internals(Internals.NEW)
                 .economy(false)
                 .build();
     }
@@ -36,58 +46,113 @@ public final class MakiScreen extends EPlugin implements Listener {
     public void onEnable() {
         super.onEnable();
         instance = this;
+
+        // Create directories
+        new File(getDataFolder(), "videos").mkdirs();
+        new File(getDataFolder(), "audio").mkdirs();
+        new File(getDataFolder(), "resourcepack").mkdirs();
+
+        // Initialize dither lookup tables
+        logger.info("Initializing color lookup tables...");
+        DitherLookupUtil.init();
+
+        // Initialize screen manager
+        screenManager = new ScreenManager(this);
+        screenManager.loadScreens();
+
+        // Initialize YouTube download manager
+        youtubeDownloadManager = new YoutubeDownloadManager(this);
+
+        // Initialize resource pack server
+        if (getConfig().getBoolean("resourcepack.enabled", true)) {
+            String address = getConfig().getString("resourcepack.address", "localhost");
+            int port = getConfig().getInt("resourcepack.port", 8080);
+            resourcePackServer = new ResourcePackServer(this, address, port);
+            resourcePackServer.start();
+        }
+
+        // Register commands
         commands = new MakiCommandCache(this);
         commands.register(this);
         setCommandCache(commands);
 
-        ConfigFile configFile = new ConfigFile(this);
-        configFile.run();
-
-        ImageManager manager = ImageManager.getInstance();
-        manager.init();
-
-        logger.info("Hi!");
+        // Register events
         getServer().getPluginManager().registerEvents(this, this);
 
-        logger.info("Config file loaded \n"+
-                "Map Size: " + ConfigFile.getMapSize() +"\n"+
-                "Map Width: " + ConfigFile.getMapWidth() +"\n"+
-                "Width: " + ConfigFile.getVCWidth() +"\n"+
-                "Height: " + ConfigFile.getVCHeight()
-
-        );
-
-        int mapSize = ConfigFile.getMapSize();
-        int mapWidth = ConfigFile.getMapWidth();
-
-       /*videoCapture = new VideoCapture(this,
-                ConfigFile.getVCWidth(),
-                ConfigFile.getVCHeight()
-        );
-        videoCapture.start();*/
-        grabber = new OpenCVFrameGrabber(new File(getDataFolder() + "/video.mp4"), mapSize, mapWidth);
-        grabber.prepare();
-        //grabber.runTaskTimerAsynchronously(this, 0, 1);
-
-        //FrameProcessorTask frameProcessorTask = new FrameProcessorTask(mapSize, mapWidth);
-        //frameProcessorTask.runTaskTimerAsynchronously(this, 0, 1);
+        logger.info("MakiScreen enabled!");
+        logger.info("  Screens loaded: " + screenManager.getAllScreens().size());
     }
 
     @Override
     public void onDisable() {
-        logger.info("Bye!");
-        videoCapture.cleanup();
+        // Shutdown all video players
+        for (VideoPlayer player : videoPlayers.values()) {
+            player.shutdown();
+        }
+        videoPlayers.clear();
+
+        // Stop resource pack server
+        if (resourcePackServer != null) {
+            resourcePackServer.stop();
+        }
+
+        // Save screens
+        if (screenManager != null) {
+            screenManager.saveScreens();
+        }
+
+        logger.info("MakiScreen disabled!");
     }
 
-    public Set<ScreenPart> getScreens() {
-        return screens;
+    @EventHandler
+    public void onPlayerJoin(PlayerJoinEvent event) {
+        // Send last frame to joining players
+        new BukkitRunnable() {
+            @Override
+            public void run() {
+                Player player = event.getPlayer();
+                for (VideoPlayer vp : videoPlayers.values()) {
+                    if (vp.getState() == VideoPlayer.State.PLAYING ||
+                        vp.getState() == VideoPlayer.State.PAUSED) {
+                        vp.getPacketDispatcher().sendLastFrameToPlayer(player, vp.getScreen());
+                    }
+                }
+            }
+        }.runTaskLater(this, 20L);
     }
 
     public static MakiScreen getInstance() {
         return instance;
     }
 
-    public OpenCVFrameGrabber getGrabber() {
-        return grabber;
+    public ScreenManager getScreenManager() {
+        return screenManager;
+    }
+
+    public ResourcePackServer getResourcePackServer() {
+        return resourcePackServer;
+    }
+
+    public YoutubeDownloadManager getYoutubeDownloadManager() {
+        return youtubeDownloadManager;
+    }
+
+    public void registerVideoPlayer(Screen screen, VideoPlayer player) {
+        videoPlayers.put(screen.getId(), player);
+    }
+
+    public void unregisterVideoPlayer(Screen screen) {
+        VideoPlayer player = videoPlayers.remove(screen.getId());
+        if (player != null) {
+            player.shutdown();
+        }
+    }
+
+    public VideoPlayer getVideoPlayer(Screen screen) {
+        return videoPlayers.get(screen.getId());
+    }
+
+    public Map<UUID, VideoPlayer> getAllVideoPlayers() {
+        return videoPlayers;
     }
 }

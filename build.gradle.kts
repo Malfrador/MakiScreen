@@ -3,67 +3,111 @@ import net.minecrell.pluginyml.bukkit.BukkitPluginDescription
 repositories {
     mavenLocal()
     maven("https://jitpack.io")
-    maven("https://erethon.de/repo")
+    maven("https://repo.erethon.de/snapshots/")
     mavenCentral()
 }
 plugins {
     `java-library`
-    id("io.papermc.paperweight.userdev") version "1.3.6-SNAPSHOT"
-    id("xyz.jpenilla.run-paper") version "1.0.6" // Adds runServer and runMojangMappedServer tasks for testing
-    id ("com.github.johnrengelman.shadow") version "7.1.2"
+    id("io.papermc.paperweight.userdev") version "2.0.0-beta.17"
+    id("xyz.jpenilla.run-paper") version "2.3.1"
+    id("com.gradleup.shadow") version "9.3.1"
     id("net.minecrell.plugin-yml.bukkit") version "0.5.1"
 }
 
 group = "cat.maki.makiscreen"
-version = "1.1.1"
+version = "2.0.0"
 
 java {
-    toolchain.languageVersion.set(JavaLanguageVersion.of(17))
+    toolchain.languageVersion.set(JavaLanguageVersion.of(21))
 }
 
 dependencies {
-    paperDevBundle("1.19.2-R0.1-SNAPSHOT")
-    implementation("de.erethon:bedrock:1.2.1") { isTransitive = false }
-    implementation("com.github.sealedtx:java-youtube-downloader:3.1.0")
-    implementation("org.bytedeco:javacv-platform:1.5.7")
-    implementation("org.bytedeco:ffmpeg-platform:5.0-1.5.7")
+    paperweight.paperDevBundle("1.21.11-R0.1-SNAPSHOT")
+    implementation("de.erethon:bedrock:1.5.18") { isTransitive = false }
+
+    // JavaCV core library with FFmpeg
+    implementation("org.bytedeco:javacv:1.5.10")
+    implementation("org.bytedeco:ffmpeg:6.1.1-1.5.10:windows-x86_64")
+    implementation("org.bytedeco:ffmpeg:6.1.1-1.5.10:linux-x86_64")
+    implementation("org.bytedeco:javacpp:1.5.10")
+
+    // JSON library for yt-dlp output parsing
+    implementation("com.alibaba:fastjson:1.2.83")
+}
+
+paperweight {
+    javaLauncher = javaToolchains.launcherFor {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
 }
 
 tasks {
     assemble {
-        dependsOn(reobfJar)
         dependsOn(shadowJar)
     }
 
     compileJava {
-        options.encoding = Charsets.UTF_8.name()
-        options.release.set(17)
+        options.encoding = "UTF-8"
+        options.release.set(21)
     }
-    javadoc {
-        options.encoding = Charsets.UTF_8.name()
-    }
-    processResources {
-        filteringCharset = Charsets.UTF_8.name()
+
+    reobfJar {
+        outputJar.set(layout.buildDirectory.file("libs/MakiScreen-${project.version}.jar"))
     }
 
     shadowJar {
+        archiveClassifier.set("all")
+
         dependencies {
-            include(dependency("de.erethon:bedrock:1.2.1"))
-            include(dependency("org.bytedeco::1.5.7"))
-            include(dependency("org.bytedeco::5.0-1.5.7"))
+            include(dependency("de.erethon:bedrock:1.5.18"))
+            include(dependency("org.bytedeco:javacv:.*"))
+            include(dependency("org.bytedeco:ffmpeg:.*"))
+            include(dependency("org.bytedeco:javacpp:.*"))
+            include(dependency("com.alibaba:fastjson:.*"))
         }
+
         relocate("de.erethon.bedrock", "cat.maki.makiscreen.bedrock")
-        //relocate("org.bytedeco::1.5.7", "cat.maki.makiscreen.javacv")
+        mergeServiceFiles()
     }
+
     bukkit {
         load = BukkitPluginDescription.PluginLoadOrder.STARTUP
         main = "cat.maki.makiscreen.MakiScreen"
-        apiVersion = "1.19"
+        apiVersion = "1.21"
         authors = listOf("Maki", "Malfrador")
-        commands {
-            register("maki") {
-                description = "Does things!"
-                aliases = listOf("mscreen")
+
+        permissions {
+            register("makiscreen.create") {
+                description = "Allows creating screens"
+                default = BukkitPluginDescription.Permission.Default.OP
+            }
+            register("makiscreen.delete") {
+                description = "Allows deleting screens"
+                default = BukkitPluginDescription.Permission.Default.OP
+            }
+            register("makiscreen.play") {
+                description = "Allows playing videos"
+                default = BukkitPluginDescription.Permission.Default.OP
+            }
+            register("makiscreen.control") {
+                description = "Allows pause/resume/stop/seek"
+                default = BukkitPluginDescription.Permission.Default.OP
+            }
+            register("makiscreen.download") {
+                description = "Allows downloading videos from YouTube"
+                default = BukkitPluginDescription.Permission.Default.OP
+            }
+            register("makiscreen.list") {
+                description = "Allows listing screens and videos"
+                default = BukkitPluginDescription.Permission.Default.TRUE
+            }
+            register("makiscreen.info") {
+                description = "Allows viewing screen info"
+                default = BukkitPluginDescription.Permission.Default.TRUE
+            }
+            register("makiscreen.help") {
+                description = "Allows viewing help"
+                default = BukkitPluginDescription.Permission.Default.TRUE
             }
         }
     }
