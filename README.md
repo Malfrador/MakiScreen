@@ -1,9 +1,6 @@
-WIP-Fork of [MakiScreen](https://github.com/makifoxgirl/MakiScreen) that adds local playback, audio, and high framerate video. 
-
-
+Paper plugin to play back video (and audio) in-game without the use of clientside mods. 
 
 https://github.com/user-attachments/assets/278fa439-a123-469e-a938-847f436afb0e
-
 
 
 ### Improvements
@@ -14,3 +11,4 @@ https://github.com/user-attachments/assets/278fa439-a123-469e-a938-847f436afb0e
 * Video pausing, skipping and resuming
 * Improved commands. 
 
+Originally a fork of https://github.com/makinori/MakiScreen, though most of the original code has been reworked. Thanks for the inspiration though!
