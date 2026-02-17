@@ -1,10 +1,13 @@
 package cat.maki.makiscreen.audio;
 
 import cat.maki.makiscreen.MakiScreen;
+import cat.maki.makiscreen.screen.Screen;
 import net.kyori.adventure.key.Key;
 import net.kyori.adventure.sound.Sound;
 import net.kyori.adventure.sound.SoundStop;
 import org.bukkit.Bukkit;
+import org.bukkit.Location;
+import org.bukkit.SoundCategory;
 import org.bukkit.entity.Player;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.scheduler.BukkitTask;
@@ -17,6 +20,8 @@ import org.bytedeco.javacv.Frame;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.Buffer;
+import java.nio.ShortBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -34,6 +39,7 @@ public class AudioManager {
     public static final String SOUND_NAMESPACE = "makiscreen";
 
     private final MakiScreen plugin;
+    private final Screen screen;
     private final String videoId;
     private final File audioDir;
     private final List<AudioChunk> chunks = new ArrayList<>();
@@ -48,20 +54,14 @@ public class AudioManager {
     private long playbackStartTime;
 
     /**
-     * Creates an AudioManager with default chunk duration.
-     */
-    public AudioManager(MakiScreen plugin, String videoId) {
-        this(plugin, videoId, DEFAULT_CHUNK_DURATION_MS);
-    }
-
-    /**
      * Creates an AudioManager with configurable chunk duration.
      * @param chunkDurationMs Duration of each chunk in milliseconds. Use 0 for single file mode (no chunking).
      */
-    public AudioManager(MakiScreen plugin, String videoId, int chunkDurationMs) {
+    public AudioManager(MakiScreen plugin, String videoId, int chunkDurationMs, Screen screen) {
         this.plugin = plugin;
         this.videoId = videoId;
         this.chunkDurationMs = chunkDurationMs;
+        this.screen = screen;
         // Include chunk duration in folder name to separate cached files
         String folderSuffix = chunkDurationMs == 0 ? "_single" : "_" + chunkDurationMs + "ms";
         this.audioDir = new File(plugin.getDataFolder(), "audio/" + videoId + folderSuffix);
@@ -91,7 +91,6 @@ public class AudioManager {
         if (cacheMarker.exists()) {
             plugin.getLogger().info("Audio chunks already cached, loading from disk...");
 
-            // Load existing chunks
             File[] chunkFiles = audioDir.listFiles((dir, name) -> name.startsWith("chunk_") && name.endsWith(".ogg"));
             if (chunkFiles != null && chunkFiles.length > 0) {
                 Arrays.sort(chunkFiles, Comparator.comparingInt(f -> {
@@ -99,12 +98,10 @@ public class AudioManager {
                     return Integer.parseInt(name.substring(6, name.length() - 4));
                 }));
 
-                // Read total duration from cache marker
                 try {
                     String durationStr = Files.readString(cacheMarker.toPath()).trim();
                     totalDurationMs = Long.parseLong(durationStr);
                 } catch (Exception e) {
-                    // Estimate from chunk count (only valid for non-single mode)
                     if (!isSingleFileMode()) {
                         totalDurationMs = (long) chunkFiles.length * chunkDurationMs;
                     }
@@ -123,7 +120,6 @@ public class AudioManager {
 
         try {
             FFmpegFrameGrabber grabber = new FFmpegFrameGrabber(videoFile);
-            // Set the sample format
             grabber.setSampleFormat(avutil.AV_SAMPLE_FMT_FLTP);
             grabber.start();
 
@@ -143,15 +139,23 @@ public class AudioManager {
                                    ", Channels: " + channels + ", SampleFormat: " + sampleFormat +
                                    " (FLTP=" + avutil.AV_SAMPLE_FMT_FLTP + ")");
 
+            // Handle multi-channel audio (5.1, 7.1, etc.) by downmixing to stereo
+            int outputChannels = channels;
+            if (channels > 2) {
+                plugin.getLogger().info("Multi-channel audio detected (" + channels + " channels). " +
+                                       "Downmixing to stereo for compatibility.");
+                outputChannels = 2;
+            }
+
             // Extract full audio first as OGG
             File fullAudio = new File(audioDir, "full_audio.ogg");
-            extractFullAudio(grabber, fullAudio, sampleRate, channels, sampleFormat);
+            extractFullAudio(grabber, fullAudio, sampleRate, outputChannels, sampleFormat);
 
             grabber.stop();
             grabber.close();
 
             if (isSingleFileMode()) {
-                // Single file mode - just use the full audio as chunk 0
+                // just use the full audio as chunk 0
                 plugin.getLogger().info("Single file mode - using full audio as single chunk");
                 File singleChunk = new File(audioDir, "chunk_0.ogg");
                 Files.copy(fullAudio.toPath(), singleChunk.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
@@ -167,18 +171,14 @@ public class AudioManager {
                                            "merging with previous chunk");
                     numChunks--;
                 }
-
                 plugin.getLogger().info("Splitting audio into " + numChunks + " chunks of " +
                                        (chunkDurationMs / 1000) + " seconds each");
-
-                // Split audio by reading sequentially - sample-accurate chunking
-                extractChunksSequentially(fullAudio, sampleRate, channels);
+                extractChunksSequentially(fullAudio, sampleRate, outputChannels);
             }
 
             // Keep full audio file for reference/debugging
-            // fullAudio.delete();
+            fullAudio.delete();
 
-            // Create cache marker to skip processing next time
             File completionMarker = new File(audioDir, ".extraction_complete");
             Files.writeString(completionMarker.toPath(), String.valueOf(totalDurationMs));
 
@@ -232,16 +232,15 @@ public class AudioManager {
     private void extractChunksSequentially(File fullAudio, int sampleRate, int channels) throws Exception {
         plugin.getLogger().info("Extracting chunks using sample-accurate WAV intermediate...");
 
-        // Calculate exact samples per chunk
         int samplesPerChunk = sampleRate * (chunkDurationMs / 1000);
 
         plugin.getLogger().info("Sample rate: " + sampleRate + ", Samples per " + (chunkDurationMs / 1000) + "s chunk: " + samplesPerChunk);
 
-        // Step 1: Extract full audio as WAV (PCM) for sample-accurate processing
+        // Extract full audio as WAV (PCM) for sample-accurate processing
         File fullWav = new File(audioDir, "full_audio.wav");
         convertToWav(fullAudio, fullWav, sampleRate, channels);
 
-        // Step 2: Read the WAV and count total samples using grabber timestamps
+        //Read the WAV and count total samples using grabber timestamps
         FFmpegFrameGrabber grabber = new FFmpegFrameGrabber(fullWav);
         grabber.setSampleFormat(avutil.AV_SAMPLE_FMT_S16); // PCM 16-bit for WAV
         grabber.start();
@@ -256,7 +255,6 @@ public class AudioManager {
                 continue;
             }
 
-            // Convert frame samples to float arrays for easier manipulation
             float[][] frameSamples = extractSamplesAsFloat(frame, channels);
             if (frameSamples != null && frameSamples[0].length > 0) {
                 allSamples.add(frameSamples);
@@ -269,7 +267,7 @@ public class AudioManager {
 
         plugin.getLogger().info("Collected " + totalSamplesCollected + " total samples from " + allSamples.size() + " frames");
 
-        // Step 3: Flatten all samples into one continuous buffer per channel
+        //  Flatten all samples into one continuous buffer per channel
         float[][] continuousBuffer = new float[channels][(int) totalSamplesCollected];
         int writePos = 0;
         for (float[][] frameSamples : allSamples) {
@@ -279,7 +277,7 @@ public class AudioManager {
             }
             writePos += frameLength;
         }
-        allSamples.clear(); // Free memory
+        allSamples.clear();
 
         plugin.getLogger().info("Created continuous buffer with " + writePos + " samples per channel");
 
@@ -291,20 +289,19 @@ public class AudioManager {
             int remainingSamples = totalSamples - samplePos;
             int chunkSamples = Math.min(samplesPerChunk, remainingSamples);
 
-            // Skip very short final chunks (less than 0.5 seconds)
+            // Skip very short final chunks
             if (chunkSamples < sampleRate / 2 && chunkIndex > 0) {
                 plugin.getLogger().info("Skipping final chunk with only " + chunkSamples + " samples (" +
                                        (chunkSamples * 1000 / sampleRate) + "ms)");
                 break;
             }
 
-            // Extract chunk samples - no padding, use actual duration
             float[][] chunkBuffer = new float[channels][chunkSamples];
             for (int ch = 0; ch < channels; ch++) {
                 System.arraycopy(continuousBuffer[ch], samplePos, chunkBuffer[ch], 0, chunkSamples);
             }
 
-            // Write chunk as WAV first (sample-accurate)
+            // Write chunk as WAV first
             File chunkWav = new File(audioDir, "chunk_" + chunkIndex + ".wav");
             writeWavFromSamples(chunkWav, chunkBuffer, sampleRate, channels);
 
@@ -328,7 +325,6 @@ public class AudioManager {
             samplePos += chunkSamples;
         }
 
-        // Clean up intermediate files
         fullWav.delete();
 
         plugin.getLogger().info("Sample-accurate extraction complete: " + chunks.size() + " chunks created");
@@ -365,7 +361,7 @@ public class AudioManager {
             return null;
         }
 
-        // Handle interleaved S16 format (common for WAV)
+        // interleaved S16 format
         java.nio.Buffer buffer = frame.samples[0];
         if (buffer instanceof java.nio.ShortBuffer shortBuffer) {
             shortBuffer.rewind();
@@ -384,7 +380,7 @@ public class AudioManager {
             return result;
         }
 
-        // Handle planar float format (FLTP)
+        // planar float format (FLTP)
         if (frame.samples.length >= channels) {
             int samplesPerChannel = frame.samples[0].capacity() / 4; // 4 bytes per float
             float[][] result = new float[channels][samplesPerChannel];
@@ -412,31 +408,27 @@ public class AudioManager {
         recorder.setSampleFormat(avutil.AV_SAMPLE_FMT_S16);
         recorder.start();
 
-        // Write samples in chunks to avoid huge single frames
         int frameSamples = 1024; // Standard audio frame size
         for (int pos = 0; pos < samplesPerChannel; pos += frameSamples) {
             int remaining = Math.min(frameSamples, samplesPerChannel - pos);
 
-            // Create interleaved short buffer
             short[] interleaved = new short[remaining * channels];
             for (int i = 0; i < remaining; i++) {
                 for (int ch = 0; ch < channels; ch++) {
                     float sample = samples[ch][pos + i];
-                    // Clamp to [-1, 1] and convert to short
                     sample = Math.max(-1.0f, Math.min(1.0f, sample));
                     interleaved[i * channels + ch] = (short) (sample * 32767);
                 }
             }
 
-            java.nio.ShortBuffer shortBuffer = java.nio.ShortBuffer.wrap(interleaved);
+            ShortBuffer shortBuffer = ShortBuffer.wrap(interleaved);
             Frame frame = new Frame();
             frame.sampleRate = sampleRate;
             frame.audioChannels = channels;
-            frame.samples = new java.nio.Buffer[]{shortBuffer};
+            frame.samples = new Buffer[]{shortBuffer};
 
             recorder.record(frame);
         }
-
         recorder.stop();
         recorder.close();
     }
@@ -453,9 +445,7 @@ public class AudioManager {
         recorder.setAudioChannels(channels);
         recorder.setAudioBitrate(192000);
         recorder.setSampleFormat(avutil.AV_SAMPLE_FMT_FLTP);
-        // Use global header flag - this helps with encoder initialization and flushing
         recorder.setAudioOption("flags", "+global_header");
-        // Set frame size to match Vorbis block size for cleaner encoding
         recorder.setFrameNumber(0);
         recorder.start();
 
@@ -468,205 +458,8 @@ public class AudioManager {
 
         grabber.stop();
         grabber.close();
-
-
         recorder.stop();
         recorder.close();
-    }
-
-    // Helper class to store frame data with timestamp (kept for potential future use)
-    private record FrameData(Frame frame, long timestampUs) {}
-
-    private FFmpegFrameRecorder createChunkRecorder(File outputFile, int sampleRate, int channels) {
-        FFmpegFrameRecorder recorder = new FFmpegFrameRecorder(outputFile, 0, 0, channels);
-        recorder.setFormat("ogg");
-        recorder.setAudioCodec(avcodec.AV_CODEC_ID_VORBIS);
-        recorder.setSampleRate(sampleRate);
-        recorder.setAudioChannels(channels);
-        recorder.setAudioBitrate(192000);
-        recorder.setSampleFormat(avutil.AV_SAMPLE_FMT_FLTP);
-        return recorder;
-    }
-
-    private void extractAudioChunkFromVideo(File videoFile, File outputFile, long startMs, long endMs,
-                                            int sampleRate, int channels) throws Exception {
-        long durationMs = endMs - startMs;
-
-        plugin.getLogger().info("Extracting chunk from video: " + startMs + "ms to " + endMs +
-                               "ms (duration: " + durationMs + "ms)");
-
-        FFmpegFrameGrabber grabber = new FFmpegFrameGrabber(videoFile);
-        grabber.setSampleFormat(avutil.AV_SAMPLE_FMT_FLTP);
-        grabber.start();
-
-        FFmpegFrameRecorder recorder = new FFmpegFrameRecorder(outputFile, 0, 0, channels);
-        recorder.setFormat("ogg");
-        recorder.setAudioCodec(avcodec.AV_CODEC_ID_VORBIS);
-        recorder.setSampleRate(sampleRate);
-        recorder.setAudioChannels(channels);
-        recorder.setAudioBitrate(192000);
-        recorder.setSampleFormat(avutil.AV_SAMPLE_FMT_FLTP);
-        recorder.start();
-
-        // Seek to start position
-        if (startMs > 0) {
-            grabber.setTimestamp(startMs * 1000); // Convert to microseconds
-        }
-
-        Frame frame;
-        int frameCount = 0;
-        while ((frame = grabber.grabSamples()) != null) {
-            if (frame.samples == null) {
-                continue;
-            }
-
-            long currentMs = grabber.getTimestamp() / 1000;
-            if (currentMs >= endMs) {
-                break;
-            }
-
-            recorder.record(frame);
-            frameCount++;
-        }
-
-        // Flush the encoder
-        try {
-            recorder.record((Frame) null);
-        } catch (Exception e) {
-            // Ignore
-        }
-
-        recorder.stop();
-        recorder.close();
-        grabber.stop();
-        grabber.close();
-
-        plugin.getLogger().info("Extracted chunk with " + frameCount + " frames (" +
-                               durationMs + "ms) to " + outputFile.getName() +
-                               " (size: " + outputFile.length() + " bytes)");
-    }
-
-    private void extractAudioChunkFFmpeg(File inputFile, File outputFile, long startMs, long durationMs) throws Exception {
-        // Use JavaCV's FFmpeg (bundled, no separate installation needed)
-        long endMs = startMs + durationMs;
-
-        FFmpegFrameGrabber grabber = new FFmpegFrameGrabber(inputFile);
-        grabber.start();
-
-        int sampleRate = grabber.getSampleRate();
-        int channels = grabber.getAudioChannels();
-
-        FFmpegFrameRecorder recorder = new FFmpegFrameRecorder(outputFile, 0, 0, channels);
-        recorder.setFormat("ogg");
-        recorder.setAudioCodec(avcodec.AV_CODEC_ID_VORBIS);
-        recorder.setSampleRate(sampleRate);
-        recorder.setAudioChannels(channels);
-        recorder.setAudioBitrate(192000);
-        recorder.setSampleFormat(avutil.AV_SAMPLE_FMT_FLTP);
-        recorder.start();
-
-        // Seek to the start position
-        if (startMs > 0) {
-            long seekTimestamp = startMs * 1000; // Convert to microseconds
-            grabber.setTimestamp(seekTimestamp);
-        }
-
-        Frame frame;
-        int frameCount = 0;
-        while ((frame = grabber.grabSamples()) != null) {
-            if (frame.samples == null) {
-                continue;
-            }
-
-            long currentMs = grabber.getTimestamp() / 1000;
-            if (currentMs >= endMs) {
-                break;
-            }
-
-            recorder.record(frame);
-            frameCount++;
-        }
-
-        // Flush the encoder
-        try {
-            recorder.record((Frame) null);
-        } catch (Exception e) {
-            // Ignore
-        }
-
-        recorder.stop();
-        recorder.close();
-        grabber.stop();
-        grabber.close();
-
-        plugin.getLogger().info("Created chunk: " + outputFile.getName() +
-                               " (" + outputFile.length() + " bytes, " + frameCount + " frames)");
-    }
-
-    private void extractAudioChunk(File audioFile, File outputFile, long startMs, long endMs,
-                                   int sampleRate, int channels, int sampleFormat) throws Exception {
-        long durationMs = endMs - startMs;
-
-        // Vorbis encoder has issues with very short chunks - minimum 500ms
-        if (durationMs < 500) {
-            plugin.getLogger().warning("Skipping chunk that is too short: " + durationMs + "ms");
-            throw new Exception("Chunk duration too short for Vorbis encoding: " + durationMs + "ms");
-        }
-
-        FFmpegFrameGrabber grabber = new FFmpegFrameGrabber(audioFile);
-        grabber.setSampleFormat(avutil.AV_SAMPLE_FMT_FLTP);
-        grabber.start();
-
-        FFmpegFrameRecorder recorder = new FFmpegFrameRecorder(outputFile, 0, 0, channels);
-        recorder.setFormat("ogg");
-        recorder.setAudioCodec(avcodec.AV_CODEC_ID_VORBIS);
-        recorder.setSampleRate(sampleRate);
-        recorder.setAudioChannels(channels);
-        recorder.setAudioBitrate(192000);
-        recorder.setSampleFormat(avutil.AV_SAMPLE_FMT_FLTP);
-        recorder.start();
-
-        // Seek to start - this works better with audio-only files
-        if (startMs > 0) {
-            grabber.setTimestamp(startMs * 1000);
-        }
-
-        Frame frame;
-        int frameCount = 0;
-        while ((frame = grabber.grabSamples()) != null) {
-            if (frame.samples == null) {
-                continue;
-            }
-
-            long currentMs = grabber.getTimestamp() / 1000;
-            if (currentMs >= endMs) {
-                break;
-            }
-
-            recorder.record(frame);
-            frameCount++;
-        }
-
-        // Check if we got enough frames
-        if (frameCount < 10) {
-            plugin.getLogger().warning("Very few frames recorded for chunk: " + frameCount +
-                                      " (duration: " + durationMs + "ms). This may cause encoding issues.");
-        }
-
-        // Flush the encoder
-        try {
-            recorder.record((Frame) null);
-        } catch (Exception e) {
-            // Ignore
-        }
-
-        recorder.stop();
-        recorder.close();
-        grabber.stop();
-        grabber.close();
-
-        plugin.getLogger().info("Extracted chunk with " + frameCount + " frames (" +
-                               durationMs + "ms) to " + outputFile.getName());
     }
 
     public File generateResourcePack() {
@@ -679,14 +472,12 @@ public class AudioManager {
         soundsDir.mkdirs();
 
         try {
-            // Copy audio files
             for (AudioChunk chunk : chunks) {
                 File dest = new File(soundsDir, "chunk_" + chunk.index() + ".ogg");
                 Files.copy(chunk.file().toPath(), dest.toPath(),
                           java.nio.file.StandardCopyOption.REPLACE_EXISTING);
             }
 
-            // Generate pack.mcmeta
             File packMeta = new File(packDir, "pack.mcmeta");
             String mcmeta = """
                 {
@@ -698,7 +489,6 @@ public class AudioManager {
                 """;
             Files.writeString(packMeta.toPath(), mcmeta);
 
-            // Generate sounds.json
             File soundsJson = new File(packDir, "assets/" + SOUND_NAMESPACE + "/sounds.json");
             soundsJson.getParentFile().mkdirs();
 
@@ -712,9 +502,6 @@ public class AudioManager {
                 json.append("      {\n");
                 json.append("        \"name\": \"").append(SOUND_NAMESPACE).append(":")
                     .append(videoId).append("/chunk_").append(chunk.index()).append("\",\n");
-                // preload=true: Load when pack loads, not when played - reduces playback latency
-                // stream=false: 5-second chunks are small enough to load fully into memory
-                //               This provides more precise playback timing than streaming
                 json.append("        \"preload\": true,\n");
                 json.append("        \"stream\": false\n");
                 json.append("      }\n");
@@ -729,8 +516,6 @@ public class AudioManager {
             json.append("}\n");
 
             Files.writeString(soundsJson.toPath(), json.toString());
-
-            // Create ZIP
             File zipFile = new File(plugin.getDataFolder(), "makiscreen_audio_" + videoId + ".zip");
             createZip(packDir, zipFile);
 
@@ -762,7 +547,7 @@ public class AudioManager {
         }
     }
 
-    public void play() {
+    public void play(Location location) {
         if (chunks.isEmpty() || isPlaying.get()) {
             return;
         }
@@ -771,11 +556,11 @@ public class AudioManager {
         currentChunkIndex.set(0);
         playbackStartTime = System.currentTimeMillis();
 
-        playChunk(0);
+        playChunk(0, location);
 
         // Only schedule chunk transitions in chunked mode
         if (!isSingleFileMode()) {
-            scheduleNextChunks();
+            scheduleNextChunks(location);
         }
     }
 
@@ -794,23 +579,22 @@ public class AudioManager {
         stopAllSounds();
     }
 
-    public void resume() {
+    public void resume(Location location) {
         if (isPlaying.get() || chunks.isEmpty()) {
             return;
         }
 
         isPlaying.set(true);
 
-        // For single file mode, just resume from beginning or use pausedAtMs for seeking
-        // For chunked mode, calculate which chunk to resume from
+        // For single file mode, just resume from beginning
         int chunkIndex = isSingleFileMode() ? 0 : (int) (pausedAtMs / chunkDurationMs);
         currentChunkIndex.set(chunkIndex);
 
         playbackStartTime = System.currentTimeMillis() - pausedAtMs;
 
-        playChunk(chunkIndex);
+        playChunk(chunkIndex, location);
         if (!isSingleFileMode()) {
-            scheduleNextChunks();
+            scheduleNextChunks(location);
         }
     }
 
@@ -825,44 +609,40 @@ public class AudioManager {
         stopAllSounds();
     }
 
-    public void seekTo(long timeMs) {
+    public void seekTo(long timeMs, Location location) {
         boolean wasPlaying = isPlaying.get();
         stop();
 
         pausedAtMs = timeMs;
 
         if (wasPlaying) {
-            resume();
+            resume(location);
         }
     }
 
-    private void playChunk(int index) {
+    private void playChunk(int index, Location location) {
         if (index < 0 || index >= chunks.size()) {
             return;
         }
 
         AudioChunk chunk = chunks.get(index);
-        Key soundKey = Key.key(SOUND_NAMESPACE, videoId + ".chunk_" + chunk.index());
-
-        Sound sound = Sound.sound(soundKey, Sound.Source.RECORD, 1.0f, 1.0f);
-
-        for (Player player : Bukkit.getOnlinePlayers()) {
-            player.playSound(sound);
+        String key = SOUND_NAMESPACE + ":" + videoId + ".chunk_" + chunk.index();
+        for (Player player : screen.getViewers()) {
+            player.playSound(location, key, SoundCategory.RECORDS, 1.0f, 1.0f);
         }
     }
 
     private void stopAllSounds() {
         for (int i = 0; i < chunks.size(); i++) {
-            Key soundKey = Key.key(SOUND_NAMESPACE, videoId + ".chunk_" + i);
-            SoundStop stop = SoundStop.named(soundKey);
+            String key = SOUND_NAMESPACE + ":" + videoId + ".chunk_" + i;
 
-            for (Player player : Bukkit.getOnlinePlayers()) {
-                player.stopSound(stop);
+            for (Player player : screen.getViewers()) {
+                player.stopSound(key);
             }
         }
     }
 
-    private void scheduleNextChunks() {
+    private void scheduleNextChunks(Location location) {
         chunkScheduler = new BukkitRunnable() {
             @Override
             public void run() {
@@ -874,27 +654,23 @@ public class AudioManager {
                 long elapsedMs = System.currentTimeMillis() - playbackStartTime;
                 int current = currentChunkIndex.get();
 
-                // Calculate which chunk should be playing based on configured chunk duration
                 int expectedChunk = (int) (elapsedMs / chunkDurationMs);
 
-                // Play next chunk if we've moved to a new chunk
                 if (expectedChunk > current && expectedChunk < chunks.size()) {
                     currentChunkIndex.set(expectedChunk);
-                    playChunk(expectedChunk);
+                    playChunk(expectedChunk, location);
 
-                    // Log timing info for debugging
                     long expectedMs = (long) expectedChunk * chunkDurationMs;
                     plugin.getLogger().fine("Chunk " + expectedChunk + " triggered at " + elapsedMs +
                                            "ms (expected: " + expectedMs + "ms, drift: " + (elapsedMs - expectedMs) + "ms)");
                 }
 
-                // Check if playback is complete
                 if (expectedChunk >= chunks.size()) {
                     isPlaying.set(false);
                     cancel();
                 }
             }
-        }.runTaskTimer(plugin, 1L, 1L); // Check every tick (50ms) for precise timing
+        }.runTaskTimer(plugin, 1L, 1L);
     }
 
 
@@ -916,8 +692,6 @@ public class AudioManager {
 
     public void cleanup() {
         stop();
-        // Note: We keep the audio files and resource pack for reuse
-        // They can be manually deleted from the audio/ folder if needed
     }
 
     public record AudioChunk(int index, long startMs, long durationMs, File file) {}

@@ -18,7 +18,7 @@ group = "cat.maki.makiscreen"
 version = "2.0.0"
 
 java {
-    toolchain.languageVersion.set(JavaLanguageVersion.of(21))
+    toolchain.languageVersion.set(JavaLanguageVersion.of(25))
 }
 
 dependencies {
@@ -37,7 +37,7 @@ dependencies {
 
 paperweight {
     javaLauncher = javaToolchains.launcherFor {
-        languageVersion = JavaLanguageVersion.of(21)
+        languageVersion = JavaLanguageVersion.of(25)
     }
 }
 
@@ -48,7 +48,12 @@ tasks {
 
     compileJava {
         options.encoding = "UTF-8"
-        options.release.set(21)
+        options.release.set(25)
+        options.compilerArgs.addAll(listOf("--enable-preview"))
+    }
+
+    runServer {
+        minecraftVersion("1.21.11")
     }
 
     reobfJar {

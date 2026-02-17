@@ -24,6 +24,7 @@ public class YoutubeDownloadManager {
     private final File ytDlpExecutable;
     private final Map<UUID, DownloadTask> activeDownloads = new ConcurrentHashMap<>();
     private boolean ytDlpReady = false;
+    private boolean initializationInProgress = false;
     private String jsRuntimePath = null;
     private String ffmpegPath = null;
 
@@ -40,14 +41,95 @@ public class YoutubeDownloadManager {
         String exeName = os.contains("win") ? "yt-dlp.exe" : "yt-dlp";
         this.ytDlpExecutable = new File(plugin.getDataFolder(), exeName);
 
-        // Initialize yt-dlp
+        // Check if yt-dlp already exists
+        if (ytDlpExecutable.exists()) {
+            plugin.getLogger().info("yt-dlp found at: " + ytDlpExecutable.getAbsolutePath());
+            // Initialize immediately if already downloaded
+            initializeYtDlp();
+        } else {
+            plugin.getLogger().info("yt-dlp not found - will be downloaded when first needed");
+            if (plugin.getConfig().getBoolean("youtube.require-consent", true)) {
+                plugin.getLogger().info("User consent will be requested before downloading yt-dlp");
+            }
+        }
+    }
+
+    /**
+     * Check if user has given consent to download yt-dlp
+     */
+    public boolean hasUserConsent() {
+        if (!plugin.getConfig().getBoolean("youtube.require-consent", true)) {
+            return true;
+        }
+
+        // Check if yt-dlp already exists
+        if (ytDlpExecutable.exists()) {
+            return true;
+        }
+
+        // Check data file for stored consent
+        File dataFile = new File(plugin.getDataFolder(), "data.yml");
+        if (dataFile.exists()) {
+            org.bukkit.configuration.file.YamlConfiguration data =
+                org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(dataFile);
+            return data.getBoolean("ytdlp-consent-given", false);
+        }
+
+        return false;
+    }
+
+    /**
+     * Save user consent to data file
+     */
+    public void saveUserConsent(boolean consent) {
+        File dataFile = new File(plugin.getDataFolder(), "data.yml");
+        org.bukkit.configuration.file.YamlConfiguration data =
+            org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(dataFile);
+
+        data.set("ytdlp-consent-given", consent);
+        data.set("ytdlp-consent-timestamp", System.currentTimeMillis());
+
+        try {
+            data.save(dataFile);
+        } catch (Exception e) {
+            plugin.getLogger().warning("Failed to save consent data: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Ensure yt-dlp is initialized (download if needed with consent)
+     * @return true if ready or initialization started, false if consent needed
+     */
+    public boolean ensureInitialized() {
+        if (ytDlpReady) {
+            return true;
+        }
+
+        if (initializationInProgress) {
+            return true;
+        }
+
+        if (!ytDlpExecutable.exists()) {
+            if (!hasUserConsent()) {
+                return false;
+            }
+        }
+
+        // Start initialization
         initializeYtDlp();
+        return true;
     }
 
     /**
      * Initialize yt-dlp - download if needed, setup if needed
      */
     private void initializeYtDlp() {
+        if (initializationInProgress || ytDlpReady) {
+            return;
+        }
+
+        initializationInProgress = true;
+
         plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
             try {
                 if (!ytDlpExecutable.exists()) {
@@ -98,6 +180,8 @@ public class YoutubeDownloadManager {
 
             } catch (Exception e) {
                 plugin.getLogger().log(Level.SEVERE, "Failed to initialize yt-dlp", e);
+            } finally {
+                initializationInProgress = false;
             }
         });
     }
@@ -156,7 +240,7 @@ public class YoutubeDownloadManager {
      * Detect available JavaScript runtime for signature solving
      */
     private void detectJavaScriptRuntime() {
-        // Try Node.js first (most common)
+        // Try Node.js first
         String[] nodeCommands = {"node", "nodejs"};
         for (String cmd : nodeCommands) {
             if (testCommand(cmd, "--version")) {
@@ -191,8 +275,8 @@ public class YoutubeDownloadManager {
             return;
         }
 
-        plugin.getLogger().warning("No JavaScript runtime found. Some YouTube videos may fail to download.");
-        plugin.getLogger().warning("Install Node.js from https://nodejs.org/ for best compatibility.");
+        plugin.getLogger().warning("No JavaScript runtime found. Some YouTube videos may fail to download due to YTs anti-bot measures.");
+        plugin.getLogger().warning("Install Node.js from https://nodejs.org/ to fix this issue and enable EJS for signature solving.");
     }
 
     /**
@@ -228,8 +312,6 @@ public class YoutubeDownloadManager {
     private void detectFfmpeg() {
         // Use ffmpeg from JavaCV's bundled native libraries
         try {
-            // JavaCV extracts native libraries to a temp directory
-            // We can use the Loader to get the actual ffmpeg executable path
             String ffmpegExe = org.bytedeco.javacpp.Loader.load(org.bytedeco.ffmpeg.ffmpeg.class);
 
             if (ffmpegExe != null && new File(ffmpegExe).exists()) {
@@ -241,7 +323,7 @@ public class YoutubeDownloadManager {
             plugin.getLogger().warning("Could not load ffmpeg from JavaCV: " + e.getMessage());
         }
 
-        // If JavaCV's ffmpeg fails, try system PATH as fallback (optional)
+        // If JavaCV's ffmpeg fails, try system PATH as fallback
         if (testCommand("ffmpeg", "-version")) {
             ffmpegPath = "ffmpeg";
             plugin.getLogger().info("Using system ffmpeg from PATH (fallback)");
@@ -258,31 +340,26 @@ public class YoutubeDownloadManager {
      */
     public VideoInfo getVideoInfo(String videoIdOrUrl) throws Exception {
         if (!ytDlpReady) {
-            throw new Exception("yt-dlp is not ready yet. Please wait a moment and try again.");
+            throw new Exception("yt-dlp is not ready yet or not enabled.");
         }
 
         List<String> command = new ArrayList<>();
         command.add(ytDlpExecutable.getAbsolutePath());
 
-        // Add cookies if available
         File cookiesFile = new File(plugin.getDataFolder(), "youtube_cookies.txt");
         if (cookiesFile.exists()) {
             command.add("--cookies");
             command.add(cookiesFile.getAbsolutePath());
         }
 
-        // Enable EJS challenge solver scripts from GitHub
         command.add("--remote-components");
         command.add("ejs:github");
 
-        // Add JS runtime if available for signature solving
         if (jsRuntimePath != null) {
             command.add("--js-runtimes");
             command.add(jsRuntimePath);
         }
 
-
-        // Skip unavailable fragments and continue
         command.add("--ignore-errors");
         command.add("--no-abort-on-error");
 
@@ -300,8 +377,6 @@ public class YoutubeDownloadManager {
             String line;
             while ((line = reader.readLine()) != null) {
                 output.append(line).append("\n");
-                // Only collect lines that look like JSON (start with { or are continuation)
-                // Skip WARNING, ERROR, and other yt-dlp messages
                 if (!line.startsWith("WARNING:") && !line.startsWith("ERROR:") &&
                     !line.startsWith("[") && !line.contains("ffmpeg not found")) {
                     jsonOutput.append(line);
@@ -326,7 +401,6 @@ public class YoutubeDownloadManager {
             throw new Exception("Failed to fetch video info: " + error);
         }
 
-        // Parse the filtered JSON output
         String jsonString = jsonOutput.toString().trim();
         if (jsonString.isEmpty()) {
             throw new Exception("No JSON output received from yt-dlp. Full output: " + output.toString());
@@ -361,7 +435,6 @@ public class YoutubeDownloadManager {
 
                 task.setState(DownloadState.DOWNLOADING);
 
-                // Prepare file name
                 String fileName = customName != null ? customName : sanitizeFilename(videoInfo.title);
                 File outputFile = new File(videosDirectory, fileName + ".mp4");
 
@@ -373,48 +446,33 @@ public class YoutubeDownloadManager {
                     plugin.getLogger().info("FPS conversion disabled - video will keep original framerate");
                 }
 
-                // Build yt-dlp command
                 List<String> command = new ArrayList<>();
                 command.add(ytDlpExecutable.getAbsolutePath());
 
-                // Add cookies if available (helps but not always required with Android client)
                 File cookiesFile = new File(plugin.getDataFolder(), "youtube_cookies.txt");
                 if (cookiesFile.exists()) {
                     command.add("--cookies");
                     command.add(cookiesFile.getAbsolutePath());
                 }
-
-                // Enable EJS challenge solver scripts from GitHub (automatic downloads)
                 command.add("--remote-components");
                 command.add("ejs:github");
-
-                // Add JS runtime if available for signature solving
                 if (jsRuntimePath != null) {
                     command.add("--js-runtimes");
                     command.add(jsRuntimePath);
                 }
-
-                // Add ffmpeg location if available
                 if (ffmpegPath != null) {
                     command.add("--ffmpeg-location");
                     command.add(ffmpegPath);
                 }
-
-                // Use best quality format with fallbacks
                 command.add("-f");
                 command.add("bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best");
-
                 command.add("--merge-output-format");
                 command.add("mp4");
-
                 command.add("-o");
                 command.add(outputFile.getAbsolutePath());
                 command.add("--no-playlist");
-
-                // Skip unavailable fragments and continue
                 command.add("--ignore-errors");
                 command.add("--no-abort-on-error");
-
                 command.add("--progress");
                 command.add("--newline");
                 command.add(videoIdOrUrl);
@@ -423,7 +481,6 @@ public class YoutubeDownloadManager {
                 pb.redirectErrorStream(true);
                 Process process = pb.start();
 
-                // Read progress and capture errors
                 Pattern progressPattern = Pattern.compile("\\[download\\]\\s+(\\d+\\.\\d+)%");
                 StringBuilder errorOutput = new StringBuilder();
                 try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
@@ -453,7 +510,10 @@ public class YoutubeDownloadManager {
                     // Convert video to 20 FPS if requested
                     if (convertToFps) {
                         plugin.getLogger().info("Download complete, converting to 20 FPS...");
-                        task.setProgress(95); // Show progress during conversion
+                        if (callback != null) {
+                            callback.onConversionStart("Download complete! Converting video to 20 FPS for optimal playback...");
+                        }
+                        task.setProgress(95);
                         if (callback != null) {
                             callback.onProgress(95);
                         }
@@ -464,7 +524,6 @@ public class YoutubeDownloadManager {
                         } catch (Exception conversionException) {
                             plugin.getLogger().log(Level.SEVERE, "Error during video conversion: ", conversionException);
                             plugin.getLogger().warning("Using original video without FPS conversion");
-                            // Still use the downloaded file even if conversion failed
                         }
                     } else {
                         plugin.getLogger().info("Download complete (FPS conversion skipped)");
@@ -514,7 +573,6 @@ public class YoutubeDownloadManager {
                     return result;
                 }
             } catch (Exception e) {
-                // Try next codec
                 plugin.getLogger().info("Codec " + codec + " failed, trying next...");
             }
         }
@@ -530,12 +588,11 @@ public class YoutubeDownloadManager {
      * Try to convert video with a specific codec
      */
     private File tryConvertWithCodec(File inputFile, String codec) throws Exception {
-        // Create temporary output file
         File tempOutput = new File(inputFile.getParent(), inputFile.getName() + ".temp.mp4");
 
         plugin.getLogger().info("Trying to convert with codec: " + codec);
 
-        // Build ffmpeg command to convert to 20 FPS
+        // ffmpeg command to convert to 20 FPS
         List<String> command = new ArrayList<>();
         command.add(ffmpegPath);
         command.add("-i");
@@ -545,32 +602,29 @@ public class YoutubeDownloadManager {
         command.add("-c:v");
         command.add(codec);
 
-        // Use appropriate quality settings based on codec
         if (codec.contains("264") || codec.contains("265")) {
             command.add("-crf");
             command.add("23");  // Constant rate factor for h264/h265
         } else {
             command.add("-qscale:v");
-            command.add("5");  // Quality scale for mpeg4
+            command.add("5");
         }
 
         command.add("-c:a");
         command.add("copy");
-        command.add("-y"); // Overwrite output file
+        command.add("-y");
         command.add(tempOutput.getAbsolutePath());
 
         ProcessBuilder pb = new ProcessBuilder(command);
         pb.redirectErrorStream(true);
         Process process = pb.start();
 
-        // Capture output for debugging
         StringBuilder output = new StringBuilder();
         boolean hasError = false;
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 output.append(line).append("\n");
-                // Log errors in real-time
                 if (line.toLowerCase().contains("error") || line.toLowerCase().contains("encoder")) {
                     plugin.getLogger().warning("ffmpeg: " + line);
                     hasError = true;
@@ -585,22 +639,19 @@ public class YoutubeDownloadManager {
 
         if (exitCode == 0 && tempOutput.exists() && tempOutput.length() > 0) {
             plugin.getLogger().info("Conversion successful, replacing original file...");
-
-            // Use Files.move for atomic replacement on Windows
             try {
                 Files.move(tempOutput.toPath(), inputFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
                 plugin.getLogger().info("Successfully converted video to 20 FPS using codec: " + codec);
                 return inputFile;
             } catch (Exception e) {
                 plugin.getLogger().warning("Failed to replace file: " + e.getMessage());
-                plugin.getLogger().warning("Trying alternative file replacement method...");
 
-                // Fallback: manual delete and rename with retry
+                // manual delete and rename with retry because Windows can be stubborn about file locks
                 int retries = 3;
                 for (int i = 0; i < retries; i++) {
                     try {
                         if (inputFile.exists() && !inputFile.delete()) {
-                            Thread.sleep(100); // Wait a bit
+                            Thread.sleep(100);
                             continue;
                         }
                         if (tempOutput.renameTo(inputFile)) {
@@ -629,14 +680,6 @@ public class YoutubeDownloadManager {
         }
     }
 
-
-    /**
-     * Check if cookies file exists
-     */
-    public boolean hasCookies() {
-        File cookiesFile = new File(plugin.getDataFolder(), "youtube_cookies.txt");
-        return cookiesFile.exists();
-    }
 
     public DownloadTask getDownloadTask(UUID downloadId) {
         return activeDownloads.get(downloadId);
@@ -672,9 +715,6 @@ public class YoutubeDownloadManager {
         return ytDlpReady;
     }
 
-    /**
-     * Simple VideoInfo class to replace the library's version
-     */
     public static class VideoInfo {
         public final String id;
         public final String title;

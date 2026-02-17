@@ -3,6 +3,8 @@ package cat.maki.makiscreen.video;
 import cat.maki.makiscreen.MakiScreen;
 import cat.maki.makiscreen.audio.AudioManager;
 import cat.maki.makiscreen.screen.Screen;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.minimessage.MiniMessage;
 import org.bytedeco.javacv.FFmpegFrameGrabber;
 import org.bytedeco.javacv.Frame;
 import org.bytedeco.javacv.Java2DFrameConverter;
@@ -11,6 +13,10 @@ import java.awt.Graphics2D;
 import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
 import java.io.File;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.Executors;
@@ -41,10 +47,7 @@ public class VideoPlayer {
     private final AtomicLong totalFrames = new AtomicLong(0);
 
     private double frameRate = 30.0;
-    private long frameIntervalMicros;
     private long videoDurationMs;
-    private int videoWidth;
-    private int videoHeight;
 
     private Consumer<VideoPlayer> onComplete;
     private Consumer<VideoPlayer> onStateChange;
@@ -58,11 +61,24 @@ public class VideoPlayer {
     private final AtomicLong framesSkipped = new AtomicLong(0);
     private long lastFrameTime;
 
+    // Debug metrics
+    private final Set<UUID> debugEnabledPlayers = Collections.synchronizedSet(new HashSet<>());
+    private long debugLastUpdateTime = System.nanoTime();
+    private int debugFrameCount = 0;
+    private double debugCurrentFps = 0.0;
+    private long debugAverageFrameProcessTime = 0;
+    private final PerformanceMetrics performanceMetrics;
+
+    // Reusable objects
+    private BufferedImage resizedImageBuffer;
+    private Graphics2D resizedGraphics;
+
     public VideoPlayer(MakiScreen plugin, Screen screen) {
         this.plugin = plugin;
         this.screen = screen;
-        this.frameProcessor = new FrameProcessor(screen);
+        this.frameProcessor = new FrameProcessor(screen, plugin);
         this.packetDispatcher = new PacketDispatcher(plugin);
+        this.performanceMetrics = new PerformanceMetrics();
         this.converter = new Java2DFrameConverter();
     }
 
@@ -92,18 +108,40 @@ public class VideoPlayer {
                 frameRate = 20.0;
             }
 
-            // Update packet dispatcher with frame rate for adaptive limiting
             packetDispatcher.setFrameRate(frameRate);
 
-            frameIntervalMicros = (long) (1_000_000.0 / frameRate);
             totalFrames.set(grabber.getLengthInVideoFrames());
             videoDurationMs = grabber.getLengthInTime() / 1000;
-            videoWidth = grabber.getImageWidth();
-            videoHeight = grabber.getImageHeight();
+            int videoWidth = grabber.getImageWidth();
+            int videoHeight = grabber.getImageHeight();
 
             currentFrame.set(0);
             state.set(State.IDLE);
             notifyStateChange();
+
+            // Pre-allocate reusable buffer
+            int targetWidth = screen.getPixelWidth();
+            int targetHeight = screen.getPixelHeight();
+            if (videoWidth != targetWidth || videoHeight != targetHeight) {
+                if (resizedImageBuffer == null ||
+                    resizedImageBuffer.getWidth() != targetWidth ||
+                    resizedImageBuffer.getHeight() != targetHeight) {
+
+                    if (resizedGraphics != null) {
+                        resizedGraphics.dispose();
+                    }
+
+                    resizedImageBuffer = new BufferedImage(targetWidth, targetHeight, BufferedImage.TYPE_3BYTE_BGR);
+                    resizedGraphics = resizedImageBuffer.createGraphics();
+
+                    boolean isUpscaling = videoWidth < targetWidth || videoHeight < targetHeight;
+                    if (isUpscaling) {
+                        resizedGraphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
+                    } else {
+                        resizedGraphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+                    }
+                }
+            }
 
             plugin.getLogger().info("Loaded video: " + videoFile.getName());
             plugin.getLogger().info("  Resolution: " + videoWidth + "x" + videoHeight);
@@ -116,6 +154,21 @@ public class VideoPlayer {
 
             plugin.getLogger().info("  Duration: " + formatDuration(videoDurationMs));
             plugin.getLogger().info("  Total frames: " + totalFrames.get());
+
+            // Check aspect ratio mismatch and inform about letterboxing/pillarboxing
+            double videoAspect = (double) videoWidth / videoHeight;
+            double screenAspect = (double) screen.getPixelWidth() / screen.getPixelHeight();
+            if (Math.abs(videoAspect - screenAspect) > 0.01) {
+                plugin.getLogger().info("  Video aspect ratio: " + String.format("%.2f", videoAspect) +
+                                      " (" + videoWidth + ":" + videoHeight + ")");
+                plugin.getLogger().info("  Screen aspect ratio: " + String.format("%.2f", screenAspect) +
+                                      " (" + screen.getPixelWidth() + ":" + screen.getPixelHeight() + ")");
+                if (videoAspect > screenAspect) {
+                    plugin.getLogger().info("  Applying letterboxing (black bars top/bottom) to maintain aspect ratio");
+                } else {
+                    plugin.getLogger().info("  Applying pillarboxing (black bars left/right) to maintain aspect ratio");
+                }
+            }
 
             return true;
         } catch (Exception e) {
@@ -131,19 +184,26 @@ public class VideoPlayer {
             plugin.getLogger().warning("No video loaded");
             return;
         }
-
         State currentState = state.get();
         if (currentState == State.PLAYING) {
             return;
         }
-
         if (currentState == State.PAUSED) {
             resume();
             return;
         }
 
+        // Check for valid screen origin before starting playback
+        if (!screen.hasValidOrigin()) {
+            plugin.getLogger().warning("Cannot play: Screen '" + screen.getName() + "' has no valid origin location");
+            return;
+        }
+
         state.set(State.PLAYING);
         notifyStateChange();
+
+        // Start viewer cache updater on main thread (updates every 10 ticks = 500ms)
+        screen.startViewerCacheUpdater(plugin, 10L);
 
         if (scheduler == null || scheduler.isShutdown()) {
             scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -153,23 +213,15 @@ public class VideoPlayer {
                 return t;
             });
         }
-
         playbackStartTime = System.nanoTime();
         lastFrameTime = playbackStartTime;
         framesProcessed.set(0);
         framesSkipped.set(0);
-
         if (audioManager != null) {
-            audioManager.play();
+            audioManager.play(screen.getCenterLocation());
         }
-
-        playbackTask = scheduler.scheduleAtFixedRate(
-            this::processNextFrame,
-            0,
-            frameIntervalMicros,
-            TimeUnit.MICROSECONDS
-        );
-
+        // Start with frame -1 so first frame will be frame 0
+        scheduleNextFrame(-1);
         plugin.getLogger().info("Started playback of " + videoFile.getName());
     }
 
@@ -177,20 +229,15 @@ public class VideoPlayer {
         if (state.get() != State.PLAYING) {
             return;
         }
-
         state.set(State.PAUSED);
         notifyStateChange();
-
         if (playbackTask != null) {
             playbackTask.cancel(false);
         }
-
         pausedAtFrame = currentFrame.get();
-
         if (audioManager != null) {
             audioManager.pause();
         }
-
         plugin.getLogger().info("Paused playback at frame " + pausedAtFrame);
     }
 
@@ -198,23 +245,14 @@ public class VideoPlayer {
         if (state.get() != State.PAUSED) {
             return;
         }
-
         state.set(State.PLAYING);
         notifyStateChange();
-
         playbackStartTime = System.nanoTime() - (long)(pausedAtFrame / frameRate * 1_000_000_000L);
-
         if (audioManager != null) {
-            audioManager.resume();
+            audioManager.resume(screen.getCenterLocation());
         }
-
-        playbackTask = scheduler.scheduleAtFixedRate(
-            this::processNextFrame,
-            0,
-            frameIntervalMicros,
-            TimeUnit.MICROSECONDS
-        );
-
+        // Schedule from pausedAtFrame - 1 because processNextFrame will increment currentFrame
+        scheduleNextFrame(pausedAtFrame - 1);
         plugin.getLogger().info("Resumed playback from frame " + pausedAtFrame);
     }
 
@@ -222,47 +260,51 @@ public class VideoPlayer {
         State previousState = state.getAndSet(State.STOPPED);
         notifyStateChange();
 
+        // Stop the viewer cache updater
+        screen.stopViewerCacheUpdater();
+
         if (playbackTask != null) {
             playbackTask.cancel(false);
             playbackTask = null;
         }
-
         if (audioManager != null) {
             audioManager.stop();
         }
-
         try {
             if (grabber != null) {
                 grabber.setFrameNumber(0);
             }
         } catch (Exception ignored) {}
-
         currentFrame.set(0);
-
         if (previousState == State.PLAYING || previousState == State.PAUSED) {
             plugin.getLogger().info("Stopped playback");
         }
-
         state.set(State.IDLE);
     }
 
     public void seek(long frameNumber) {
         if (grabber == null) return;
-
         try {
             frameNumber = Math.max(0, Math.min(frameNumber, totalFrames.get() - 1));
             grabber.setFrameNumber((int) frameNumber);
             currentFrame.set(frameNumber);
-
             if (audioManager != null) {
                 long timeMs = (long) (frameNumber / frameRate * 1000);
-                audioManager.seekTo(timeMs);
+                audioManager.seekTo(timeMs, screen.getCenterLocation());
             }
-
-            if (state.get() == State.PAUSED) {
+            State currentState = state.get();
+            if (currentState == State.PAUSED || currentState == State.PLAYING) {
                 playbackStartTime = System.nanoTime() - (long)(frameNumber / frameRate * 1_000_000_000L);
             }
-
+            // If playing, we need to reschedule the next frame from the new position
+            if (currentState == State.PLAYING) {
+                // Cancel the currently scheduled frame
+                if (playbackTask != null) {
+                    playbackTask.cancel(false);
+                }
+                // Schedule from frameNumber - 1 because processNextFrame will increment currentFrame
+                scheduleNextFrame(frameNumber - 1);
+            }
         } catch (Exception e) {
             plugin.getLogger().warning("Failed to seek: " + e.getMessage());
         }
@@ -273,67 +315,85 @@ public class VideoPlayer {
         seek(targetFrame);
     }
 
-    private void processNextFrame() {
+
+    private void scheduleNextFrame(long currentFrameNumber) {
         if (state.get() != State.PLAYING) {
             return;
         }
+        long nextFrameNumber = currentFrameNumber + 1;
+        long nextFrameIdealTimeNanos = playbackStartTime + (long)(nextFrameNumber * 1_000_000_000.0 / frameRate);
+        long currentTimeNanos = System.nanoTime();
+        long delayNanos = nextFrameIdealTimeNanos - currentTimeNanos;
+        if (delayNanos < 0) {
+            // process next frame immediately
+            delayNanos = 0;
+        }
+        long delayMicros = delayNanos / 1000;
+        playbackTask = scheduler.schedule(
+            this::processNextFrameAdaptive,
+            delayMicros,
+            TimeUnit.MICROSECONDS
+        );
+    }
 
+    private void processNextFrameAdaptive() {
+        long currentFrameNumber = processNextFrame();
+        scheduleNextFrame(currentFrameNumber);
+    }
+
+    private long processNextFrame() {
+        if (state.get() != State.PLAYING) {
+            return currentFrame.get();
+        }
+        long frameStartTime = System.nanoTime();
         try {
+            // Stage 1: Decode frame from video
+            long decodeStart = System.nanoTime();
             Frame frame = grabber.grabImage();
-
+            long decodeEnd = System.nanoTime();
             if (frame == null || frame.image == null) {
                 onVideoComplete();
-                return;
+                return currentFrame.get();
             }
-
+            performanceMetrics.recordFrameDecode(decodeEnd - decodeStart);
             long frameNum = currentFrame.incrementAndGet();
 
+            // Stage 2: Convert to BufferedImage
+            long conversionStart = System.nanoTime();
             BufferedImage image = converter.convert(frame);
+            long conversionEnd = System.nanoTime();
             if (image == null) {
                 framesSkipped.incrementAndGet();
-                return;
+                return frameNum;
             }
+            performanceMetrics.recordImageConversion(conversionEnd - conversionStart);
+            FrameProcessor.ProcessedFrame processedFrame = frameProcessor.processFrame(
+                image, screen.getPixelWidth(), screen.getPixelHeight(), performanceMetrics
+            );
 
-            BufferedImage resized = resizeImage(image, screen.getPixelWidth(), screen.getPixelHeight());
-            FrameProcessor.ProcessedFrame processedFrame = frameProcessor.processFrame(resized);
-            packetDispatcher.dispatchFrame(screen, processedFrame.updates());
-
+            // Stage 3: Dispatch packets
+            long dispatchStart = System.nanoTime();
+            packetDispatcher.dispatchFrame(screen, processedFrame.updates(), performanceMetrics);
+            long dispatchEnd = System.nanoTime();
+            performanceMetrics.recordPacketDispatch(dispatchEnd - dispatchStart);
             framesProcessed.incrementAndGet();
             lastFrameTime = System.nanoTime();
+            performanceMetrics.recordTotalFrame(lastFrameTime - frameStartTime);
+            updateDebugMetrics(frameStartTime);
+            return frameNum;
 
         } catch (Exception e) {
             plugin.getLogger().warning("Error processing frame: " + e.getMessage());
+            e.printStackTrace();
             framesSkipped.incrementAndGet();
+            return currentFrame.get();
         }
-    }
-
-    private BufferedImage resizeImage(BufferedImage original, int targetWidth, int targetHeight) {
-        if (original.getWidth() == targetWidth && original.getHeight() == targetHeight) {
-            return original;
-        }
-
-        BufferedImage resized = new BufferedImage(targetWidth, targetHeight, BufferedImage.TYPE_3BYTE_BGR);
-        Graphics2D g = resized.createGraphics();
-
-        // Use nearest neighbor for upscaling (source smaller than target)
-        // This creates clean "pixel blocks" that work better with dirty region detection
-        // For a 1080p video on a cinema-sized screen, each source pixel becomes a clean NxN block
-        boolean isUpscaling = original.getWidth() < targetWidth || original.getHeight() < targetHeight;
-        if (isUpscaling) {
-            g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
-        } else {
-            g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
-        }
-
-        g.drawImage(original, 0, 0, targetWidth, targetHeight, null);
-        g.dispose();
-        return resized;
     }
 
     private void onVideoComplete() {
         stop();
+        plugin.getScreenManager().fillScreenWithColor(screen, (byte) 34);
         plugin.getLogger().info("Video playback complete");
-
         if (onComplete != null) {
             onComplete.accept(this);
         }
@@ -347,16 +407,18 @@ public class VideoPlayer {
 
     public void shutdown() {
         stop();
+        screen.stopViewerCacheUpdater();
         frameProcessor.shutdown();
-
         if (scheduler != null) {
             scheduler.shutdown();
         }
-
         if (audioManager != null) {
             audioManager.cleanup();
         }
-
+        if (resizedGraphics != null) {
+            resizedGraphics.dispose();
+            resizedGraphics = null;
+        }
         try {
             if (grabber != null) {
                 grabber.close();
@@ -407,6 +469,10 @@ public class VideoPlayer {
         return frameProcessor;
     }
 
+    public PerformanceMetrics getPerformanceMetrics() {
+        return performanceMetrics;
+    }
+
     public long getFramesProcessed() {
         return framesProcessed.get();
     }
@@ -436,6 +502,95 @@ public class VideoPlayer {
             return String.format("%d:%02d:%02d", hours, minutes % 60, seconds % 60);
         } else {
             return String.format("%d:%02d", minutes, seconds % 60);
+        }
+    }
+
+    // Debug metrics methods
+
+    public void enableDebug(UUID playerId) {
+        debugEnabledPlayers.add(playerId);
+    }
+
+    public void disableDebug(UUID playerId) {
+        debugEnabledPlayers.remove(playerId);
+    }
+
+    public boolean isDebugEnabled(UUID playerId) {
+        return debugEnabledPlayers.contains(playerId);
+    }
+
+    private void updateDebugMetrics(long frameStartTime) {
+        long frameEndTime = System.nanoTime();
+        long debugLastFrameProcessTime = (frameEndTime - frameStartTime) / 1_000_000; // ms
+
+        if (debugAverageFrameProcessTime == 0) {
+            debugAverageFrameProcessTime = debugLastFrameProcessTime;
+        } else {
+            debugAverageFrameProcessTime = (debugAverageFrameProcessTime * 9 + debugLastFrameProcessTime) / 10;
+        }
+
+        debugFrameCount++;
+
+        long currentTime = System.nanoTime();
+        long timeSinceLastUpdate = currentTime - debugLastUpdateTime;
+
+        if (timeSinceLastUpdate >= 1_000_000_000L) { // 1 second
+            debugCurrentFps = debugFrameCount / (timeSinceLastUpdate / 1_000_000_000.0);
+            debugFrameCount = 0;
+            debugLastUpdateTime = currentTime;
+            sendDebugActionBar();
+        }
+    }
+
+    private void sendDebugActionBar() {
+        if (debugEnabledPlayers.isEmpty()) {
+            return;
+        }
+        long bytesPerSecond = (long) (debugCurrentFps * packetDispatcher.getLastFrameBytesSent());
+        long decode = performanceMetrics.getLastFrameDecodeUs();
+        long dither = performanceMetrics.getLastDitheringUs();
+        long upscale = performanceMetrics.getLastUpscalingUs();
+        long tiles = performanceMetrics.getLastTileExtractionUs();
+        long total = performanceMetrics.getLastTotalFrameUs();
+        float stability = performanceMetrics.getLastOutputStabilityPercent();
+        int dirtyTiles = performanceMetrics.getLastDirtyTileCount();
+        int skippedTiles = performanceMetrics.getLastSkippedTileCount();
+        int totalTiles = dirtyTiles + skippedTiles;
+
+        String message = String.format(
+            "<gray>FPS: <white>%.1f</white> <dark_gray>|</dark_gray> " +
+            "T: <white>%.1fms</white> <dark_gray>[</dark_gray>" +
+            "<yellow>D:%.1f</yellow> <gold>Di:%.1f</gold> <gold>U:%.1f</gold> <aqua>Ti:%.1f</aqua>" +
+            "<dark_gray>]</dark_gray> " +
+            "<dark_gray>|</dark_gray> BW: <white>%s/s</white> " +
+            "<dark_gray>|</dark_gray> <light_purple>Stab:<white>%.0f%%</white> Dirty:<white>%d</white>/<green>%d</green></light_purple>",
+            debugCurrentFps,
+            total / 1000.0,
+            decode / 1000.0,
+            dither / 1000.0,
+            upscale / 1000.0,
+            tiles / 1000.0,
+            formatBytes(bytesPerSecond),
+            stability,
+            dirtyTiles,
+            totalTiles
+        );
+        Component component = MiniMessage.miniMessage().deserialize(message);
+        for (UUID playerId : debugEnabledPlayers) {
+            org.bukkit.entity.Player player = org.bukkit.Bukkit.getPlayer(playerId);
+            if (player != null && player.isOnline()) {
+                player.sendActionBar(component);
+            }
+        }
+    }
+
+    private static String formatBytes(long bytes) {
+        if (bytes < 1024) {
+            return bytes + "B";
+        } else if (bytes < 1024 * 1024) {
+            return String.format("%.1fKB", bytes / 1024.0);
+        } else {
+            return String.format("%.2fMB", bytes / (1024.0 * 1024.0));
         }
     }
 }

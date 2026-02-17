@@ -1,5 +1,14 @@
 # Version 2.0.0
 
+# YouTube Download Settings
+youtube:
+  # Whether to require user consent before downloading yt-dlp
+  require-consent: true
+
+  # Auto-convert downloaded videos to 20 FPS by default
+  # Can be overridden with --no-convert flag
+  auto-convert-fps: true
+
 # Performance Settings
 performance:
   # Maximum packets per tick per player (higher = more bandwidth, smoother video)
@@ -15,6 +24,24 @@ performance:
   # Minimum changed pixels percentage to send a full map update instead of patch
   # Lower = more granular updates, Higher = fewer packets
   full-update-threshold: 75
+
+  # Bandwidth Optimization Settings
+  # These reduce network usage by being smarter about which tiles to update
+  bandwidth:
+    # Enable spatial downsampling (checkerboard pattern updates)
+    # Updates tiles in alternating pattern during low-motion scenes
+    # Recommended: true (reduces bandwidth ~30-50% in static/slow scenes)
+    spatial-downsampling: true
+
+    # Enable entropy filtering (skip dithering noise)
+    # Skips micro-updates that are just dithering artifacts
+    # Recommended: true (reduces bandwidth ~10-20%)
+    entropy-filtering: true
+
+    # Minimum unique colors in a change region to be considered significant
+    # Higher = more aggressive filtering, lower bandwidth
+    # Range: 2-10, Recommended: 3-4
+    min-unique-colors: 3
 
 # Audio Settings
 audio:
@@ -35,6 +62,7 @@ resourcepack:
   address: "localhost"
 
   # Server port
+  # Make sure this port is open in your firewall and forwarded if needed
   port: 8080
 
   # Automatically send resource pack to players when playing video with audio
@@ -46,6 +74,48 @@ resourcepack:
 
   # Resource pack prompt message (supports MiniMessage format)
   prompt: "<yellow>This video requires a resource pack for audio playback"
+
+# Dithering Settings
+# These settings control how video frames are converted to Minecraft's limited color palette
+dithering:
+  # Dithering mode: FLOYD_STEINBERG, FLOYD_STEINBERG_REDUCED, BAYER_8X8, NONE
+  # FLOYD_STEINBERG_REDUCED is recommended for best quality/compression balance
+  mode: FLOYD_STEINBERG_REDUCED
+
+  # Error diffusion strength (0.0 - 1.0)
+  # Controls how aggressively dithering errors spread to neighboring pixels
+  # Lower values = less noise, cleaner compression, but potentially more banding
+  # Higher values = more detail preservation, but noisier and harder to compress
+  # Recommended: 0.60-0.70 for good compression, 0.75-0.85 for quality
+  error-diffusion-strength: 0.8
+
+  # Error threshold (0-255)
+  # Minimum color error before diffusion occurs
+  # Higher values = only significant errors are diffused, reducing noise
+  # Lower values = all errors are diffused, potentially creating more noise
+  # Recommended: 8-12 for clean compression, 3-5 for maximum quality
+  error-threshold: 4
+
+  # Temporal dithering settings (primarily for compression efficiency)
+  temporal:
+    # Enable temporal dithering (keeps similar colors stable between frames)
+    # This dramatically improves inter-frame compression efficiency
+    # Should almost always be enabled when inter-frame-compression is enabled
+    enabled: true
+
+    # Temporal threshold (0-255)
+    # How close a new color must be to the previous frame's color to be kept
+    # Higher values = more temporal stability = better compression
+    # Lower values = more responsive to changes = better quality on fast motion
+    # Recommended: 8-32 for aggressive compression, 4-8 for quality
+    threshold: 4
+
+    # Error quantization bits (0-7)
+    # Rounds error values to reduce sub-threshold variations
+    # Higher values = more aggressive rounding = better compression
+    # Lower values = finer error propagation = better quality
+    # Recommended: 3-4 for compression, 1-2 for quality
+    error-quantization-bits: 2
 
 # Default screen settings
 defaults:

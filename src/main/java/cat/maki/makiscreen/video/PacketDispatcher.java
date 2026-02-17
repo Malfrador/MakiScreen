@@ -23,9 +23,11 @@ import java.util.concurrent.atomic.AtomicLong;
 public class PacketDispatcher {
 
     // Maximum bytes to send per frame (helps with very large screens)
-    private static final int DEFAULT_MAX_BYTES_PER_FRAME = 2 * 1024 * 1024; // 2 MB
+    // Increased to 10MB to support full-screen updates on 40x16 screens (640 tiles)
+    // Each tile is 128x128 = 16KB, so 640 tiles = ~10MB for full update
+    private static final int DEFAULT_MAX_BYTES_PER_FRAME = 10 * 1024 * 1024; // 10 MB
 
-    // Target packets per second - used for adaptive limiting on large screens
+    // Target packets per second - used for adaptive limiting on large screens (when NOT using bundles)
     private static final int TARGET_PACKETS_PER_SECOND = 1800;
 
     // Staleness tuning - higher values make skipped tiles catch up faster
@@ -37,11 +39,19 @@ public class PacketDispatcher {
     private static final int MIN_UPDATES_PER_FRAME = 4;
 
     // Scene change detection - when this % of tiles have significant changes, it's a scene cut
-    private static final float SCENE_CHANGE_THRESHOLD = 0.5f; // 50% of tiles with major changes
-    private static final int SCENE_CHANGE_PIXEL_THRESHOLD = MapTile.TOTAL_PIXELS / 3; // 33% of tile changed = major change
+    private static final float SCENE_CHANGE_THRESHOLD = 0.6f; // 60% of tiles with major changes
+    private static final int SCENE_CHANGE_PIXEL_THRESHOLD = MapTile.TOTAL_PIXELS / 2; // 50% of tile changed = major change
 
     // Minimum dirty region size to bother sending (skip tiny updates unless accumulated)
     private static final int MIN_DIRTY_REGION_PIXELS = 32;
+
+    // Aggressive bandwidth reduction: skip tiles with low-entropy changes (dither noise)
+    private boolean useEntropyFiltering = true;
+    private int minUniqueColorsThreshold = 3; // Skip tiles with <3 changed colors (likely noise)
+
+    // Spatial downsampling: in low-motion scenes, update tiles in a checkerboard pattern
+    private boolean useSpatialDownsampling = true;
+    private int frameCounter = 0;
 
     private final MakiScreen plugin;
     private int maxBytesPerFrame = DEFAULT_MAX_BYTES_PER_FRAME;
@@ -50,6 +60,10 @@ public class PacketDispatcher {
     private final AtomicLong totalBytesSent = new AtomicLong(0);
     private final AtomicInteger packetsSkippedLastFrame = new AtomicInteger(0);
     private final AtomicInteger bytesSkippedLastFrame = new AtomicInteger(0);
+
+    // Last frame metrics for debug display
+    private final AtomicInteger lastFramePacketCount = new AtomicInteger(0);
+    private final AtomicLong lastFrameBytesSent = new AtomicLong(0);
 
     // Adaptive rate limiting based on frame rate
     private double currentFrameRate = 30.0;
@@ -66,6 +80,11 @@ public class PacketDispatcher {
     public PacketDispatcher(MakiScreen plugin) {
         this.plugin = plugin;
         updateAdaptiveLimit();
+
+        // Load bandwidth optimization settings
+        this.useSpatialDownsampling = plugin.getConfig().getBoolean("performance.bandwidth.spatial-downsampling", true);
+        this.useEntropyFiltering = plugin.getConfig().getBoolean("performance.bandwidth.entropy-filtering", true);
+        this.minUniqueColorsThreshold = plugin.getConfig().getInt("performance.bandwidth.min-unique-colors", 3);
     }
 
     public void setMaxBytesPerFrame(int maxBytesPerFrame) {
@@ -91,12 +110,13 @@ public class PacketDispatcher {
             (int) (TARGET_PACKETS_PER_SECOND / currentFrameRate));
     }
 
-    public void dispatchFrame(Screen screen, List<TileUpdate> updates) {
+    public void dispatchFrame(Screen screen, List<TileUpdate> updates, PerformanceMetrics metrics) {
         Collection<? extends Player> onlinePlayers = Bukkit.getOnlinePlayers();
         if (onlinePlayers.isEmpty()) {
             return;
         }
 
+        frameCounter++;
         int totalTiles = screen.getTotalMaps();
 
         // ============ PHASE 0: Detect scene changes ============
@@ -113,7 +133,9 @@ public class PacketDispatcher {
         boolean isSceneChange = totalTiles > 0 &&
             (float) majorChangeCount / totalTiles >= SCENE_CHANGE_THRESHOLD;
 
-        if (isSceneChange && sceneChangeFramesRemaining == 0) {
+        // When using bundle packets, no need to spread scene changes across frames
+        // Bundle packets are atomic and can handle all tiles at once
+        if (isSceneChange && sceneChangeFramesRemaining == 0 && !useBundlePackets) {
             sceneChangeFramesRemaining = SCENE_CHANGE_SPREAD_FRAMES;
         }
 
@@ -139,6 +161,24 @@ public class PacketDispatcher {
             int changedPixels = update.dirtyRegion().changedPixelCount();
             int accumulated = tile.getAccumulatedChanges();
 
+            if (useEntropyFiltering && staleness < 2) {
+                if (!hasSignificantChanges(update.dirtyRegion().data())) {
+                    // Skip this noisy update, will be picked up later if accumulates
+                    lowPriorityUpdates.add(update);
+                    continue;
+                }
+            }
+
+            if (useSpatialDownsampling && !isSceneChange && staleness == 0 && changedPixels < MapTile.TOTAL_PIXELS / 4) {
+                // Checkerboard pattern: (x + y + frame) % 2
+                int pattern = (tile.getTileX() + tile.getTileY() + (frameCounter % 2)) % 2;
+                if (pattern != 0) {
+                    // Skip this tile this frame, will update next frame
+                    markUpdateSkipped(update);
+                    continue;
+                }
+            }
+
             // Critical: tiles that have been skipped too many times
             if (staleness >= CRITICAL_STALENESS_FRAMES) {
                 criticalUpdates.add(update);
@@ -157,15 +197,26 @@ public class PacketDispatcher {
             }
         }
 
-        // Sort each category by priority score
-        criticalUpdates.sort((a, b) -> Integer.compare(
-            b.tile().getFramesSinceLastSend(), a.tile().getFramesSinceLastSend()));
+        // Sort each category by priority score, then by spatial proximity (scanline order)
+        // Spatial ordering ensures client receives updates in visual rendering order
+        criticalUpdates.sort((a, b) -> {
+            int stalenessCmp = Integer.compare(b.tile().getFramesSinceLastSend(), a.tile().getFramesSinceLastSend());
+            if (stalenessCmp != 0) return stalenessCmp;
+            // Secondary sort: scanline order (top to bottom, left to right)
+            return compareSpatially(a.tile(), b.tile());
+        });
 
-        highPriorityUpdates.sort((a, b) -> Integer.compare(
-            calculatePriorityScore(b), calculatePriorityScore(a)));
+        highPriorityUpdates.sort((a, b) -> {
+            int priorityCmp = Integer.compare(calculatePriorityScore(b), calculatePriorityScore(a));
+            if (priorityCmp != 0) return priorityCmp;
+            return compareSpatially(a.tile(), b.tile());
+        });
 
-        normalUpdates.sort((a, b) -> Integer.compare(
-            calculatePriorityScore(b), calculatePriorityScore(a)));
+        normalUpdates.sort((a, b) -> {
+            int priorityCmp = Integer.compare(calculatePriorityScore(b), calculatePriorityScore(a));
+            if (priorityCmp != 0) return priorityCmp;
+            return compareSpatially(a.tile(), b.tile());
+        });
 
         // ============ PHASE 2: Build packet list with budget constraints ============
         List<ClientboundMapItemDataPacket> packets = new ArrayList<>();
@@ -176,15 +227,22 @@ public class PacketDispatcher {
 
         // Adjust budget for scene changes - allow more throughput to prevent checkerboarding
         int effectiveMaxBytes = isSceneChange || sceneChangeFramesRemaining > 0
-            ? (int) (maxBytesPerFrame * 1.5)
+            ? (int) (maxBytesPerFrame * 1.25)  // 25% boost for scene changes (was 50%)
             : maxBytesPerFrame;
 
         // Adjust max packets for scene changes
-        int effectiveMaxPackets = isSceneChange || sceneChangeFramesRemaining > 0
-            ? (int) (adaptiveMaxPacketsPerFrame * 1.3)
-            : adaptiveMaxPacketsPerFrame;
+        // When using bundle packets, we don't need packet count limits since bundles are atomic
+        // The entire bundle is one network packet, so only byte size matters
+        int effectiveMaxPackets = useBundlePackets
+            ? Integer.MAX_VALUE  // No limit with bundles - they're atomic and efficient
+            : (isSceneChange || sceneChangeFramesRemaining > 0
+                ? (int) (adaptiveMaxPacketsPerFrame * 1.3)
+                : adaptiveMaxPacketsPerFrame);
 
         // Process critical updates first - these MUST be sent
+        long packetCreationStart = metrics != null ? System.nanoTime() : 0;
+        long totalPacketCreationTime = 0;
+
         for (TileUpdate update : criticalUpdates) {
             int updateSize = update.dirtyRegion().getDataSize();
 
@@ -196,7 +254,11 @@ public class PacketDispatcher {
                 continue;
             }
 
+            long creationStart = metrics != null ? System.nanoTime() : 0;
             packets.add(createPacket(update));
+            if (metrics != null) {
+                totalPacketCreationTime += System.nanoTime() - creationStart;
+            }
             sentUpdates.add(update);
             totalBytes += updateSize;
         }
@@ -218,7 +280,11 @@ public class PacketDispatcher {
                 continue;
             }
 
+            long creationStart = metrics != null ? System.nanoTime() : 0;
             packets.add(createPacket(update));
+            if (metrics != null) {
+                totalPacketCreationTime += System.nanoTime() - creationStart;
+            }
             sentUpdates.add(update);
             totalBytes += updateSize;
         }
@@ -240,7 +306,11 @@ public class PacketDispatcher {
                 continue;
             }
 
+            long creationStart = metrics != null ? System.nanoTime() : 0;
             packets.add(createPacket(update));
+            if (metrics != null) {
+                totalPacketCreationTime += System.nanoTime() - creationStart;
+            }
             sentUpdates.add(update);
             totalBytes += updateSize;
         }
@@ -255,12 +325,18 @@ public class PacketDispatcher {
                 }
 
                 int updateSize = update.dirtyRegion().getDataSize();
-                if (totalBytes + updateSize > effectiveMaxBytes * 0.9) { // Keep some headroom
+                // When using bundles, use full byte budget since bundles are atomic
+                int byteBudget = useBundlePackets ? effectiveMaxBytes : (int)(effectiveMaxBytes * 0.9);
+                if (totalBytes + updateSize > byteBudget) {
                     markUpdateSkipped(update);
                     continue;
                 }
 
+                long creationStart = metrics != null ? System.nanoTime() : 0;
                 packets.add(createPacket(update));
+                if (metrics != null) {
+                    totalPacketCreationTime += System.nanoTime() - creationStart;
+                }
                 sentUpdates.add(update);
                 totalBytes += updateSize;
             }
@@ -270,6 +346,11 @@ public class PacketDispatcher {
                 markUpdateSkipped(update);
             }
             sceneChangeFramesRemaining--;
+        }
+
+        // Record total packet creation time
+        if (metrics != null && totalPacketCreationTime > 0) {
+            metrics.recordPacketCreation(totalPacketCreationTime);
         }
 
         // ============ PHASE 3: Update tile state ============
@@ -292,19 +373,69 @@ public class PacketDispatcher {
         int bytesSent = totalBytes;
         int packetsSent = packets.size();
 
+        // Packets are already in spatial order since we built them from sorted update lists
+        // Bundle packets preserve this ordering for atomic delivery to the client
+        long sendingStart = metrics != null ? System.nanoTime() : 0;
         for (Player player : onlinePlayers) {
             sendPacketsToPlayer(player, packets);
+        }
+        if (metrics != null) {
+            metrics.recordPacketSending(System.nanoTime() - sendingStart);
         }
 
         // When using bundles, we send 1 bundle packet per player, not N packets
         int actualPacketCount = useBundlePackets ? onlinePlayers.size() : packetsSent * onlinePlayers.size();
         totalPacketsSent.addAndGet(actualPacketCount);
         totalBytesSent.addAndGet((long) bytesSent * onlinePlayers.size());
+
+        // Update last frame metrics for debug display
+        lastFramePacketCount.set(packetsSent);
+        lastFrameBytesSent.set(bytesSent);
     }
 
     private void markUpdateSkipped(TileUpdate update) {
         update.tile().incrementFramesSinceLastSend();
         update.tile().addAccumulatedChanges(update.dirtyRegion().changedPixelCount());
+    }
+
+    /**
+     * Detect if a dirty region has significant changes or just dither noise.
+     * Low-entropy changes (few unique colors) are likely just dithering artifacts.
+     */
+    private boolean hasSignificantChanges(byte[] data) {
+        if (data.length < MIN_DIRTY_REGION_PIXELS) {
+            return false; // Too small to matter
+        }
+
+        // Count unique color values in the changed region
+        boolean[] seen = new boolean[256];
+        int uniqueColors = 0;
+
+        // Sample up to 128 pixels for performance
+        int step = Math.max(1, data.length / 128);
+        for (int i = 0; i < data.length; i += step) {
+            int colorIndex = data[i] & 0xFF;
+            if (!seen[colorIndex]) {
+                seen[colorIndex] = true;
+                uniqueColors++;
+                if (uniqueColors >= minUniqueColorsThreshold) {
+                    return true; // Enough variety, significant change
+                }
+            }
+        }
+
+        // If very few unique colors, it's likely just noise
+        return uniqueColors >= minUniqueColorsThreshold;
+    }
+
+    /**
+     * Compare tiles spatially in scanline order (top to bottom, left to right).
+     * This ensures tiles are sent in the order the client renders them, reducing checkerboarding.
+     */
+    private int compareSpatially(MapTile a, MapTile b) {
+        int yCmp = Integer.compare(a.getTileY(), b.getTileY());
+        if (yCmp != 0) return yCmp;
+        return Integer.compare(a.getTileX(), b.getTileX());
     }
 
     private int calculatePriorityScore(TileUpdate update) {
@@ -439,6 +570,14 @@ public class PacketDispatcher {
 
     public int getAdaptiveMaxPacketsPerFrame() {
         return adaptiveMaxPacketsPerFrame;
+    }
+
+    public int getLastFramePacketCount() {
+        return lastFramePacketCount.get();
+    }
+
+    public long getLastFrameBytesSent() {
+        return lastFrameBytesSent.get();
     }
 }
 

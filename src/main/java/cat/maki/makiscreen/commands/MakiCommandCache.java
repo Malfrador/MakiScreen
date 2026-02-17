@@ -25,6 +25,9 @@ public class MakiCommandCache extends ECommandCache {
         // Download
         addCommand(new DownloadCommand());
 
+        // Debug
+        addCommand(new DebugCommand());
+
         // Help
         addCommand(new HelpCommand());
     }

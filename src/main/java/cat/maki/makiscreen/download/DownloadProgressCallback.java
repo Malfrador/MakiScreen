@@ -11,6 +11,13 @@ public interface DownloadProgressCallback {
     void onProgress(int progress);
 
     /**
+     * Called when video conversion starts
+     * @param message Status message about the conversion
+     */
+    default void onConversionStart(String message) {
+    }
+
+    /**
      * Called when download completes successfully
      * @param file The downloaded file
      */

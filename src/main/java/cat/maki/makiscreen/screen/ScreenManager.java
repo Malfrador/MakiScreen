@@ -119,5 +119,24 @@ public class ScreenManager {
         unregisterScreen(screen);
         saveScreens();
     }
+
+    /**
+     * Fills a screen with a specific color and sends the update to all online players.
+     * @param screen The screen to fill
+     * @param colorByte The Minecraft map color byte (e.g., (byte) 34 for white)
+     */
+    public void fillScreenWithColor(Screen screen, byte colorByte) {
+        screen.fillWithColor(colorByte);
+        byte[][] mapData = new byte[screen.getTotalMaps()][];
+        byte[] fillData = new byte[Screen.MAP_SIZE * Screen.MAP_SIZE];
+        java.util.Arrays.fill(fillData, colorByte);
+
+        for (int i = 0; i < screen.getTotalMaps(); i++) {
+            mapData[i] = fillData;
+        }
+        cat.maki.makiscreen.video.PacketDispatcher dispatcher =
+            new cat.maki.makiscreen.video.PacketDispatcher(plugin);
+        dispatcher.dispatchFullFrame(screen, mapData);
+    }
 }
 

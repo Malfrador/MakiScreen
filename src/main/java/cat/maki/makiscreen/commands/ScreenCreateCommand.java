@@ -103,6 +103,9 @@ public class ScreenCreateCommand extends ECommand {
 
         plugin.getScreenManager().saveScreens();
 
+        // Initialize screen to white
+        plugin.getScreenManager().fillScreenWithColor(screen, (byte) 34);
+
         int totalMaps = screen.getTotalMaps();
         int pixelWidth = screen.getPixelWidth();
         int pixelHeight = screen.getPixelHeight();

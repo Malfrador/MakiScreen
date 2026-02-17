@@ -18,8 +18,12 @@ import org.bukkit.scheduler.BukkitTask;
 
 import java.io.File;
 import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
 
 public class PlayCommand extends ECommand {
 
@@ -36,14 +40,14 @@ public class PlayCommand extends ECommand {
         setPlayerCommand(true);
         setConsoleCommand(true);
         setMinArgs(0);
-        setMaxArgs(7);
-        setHelp("/maki play <screen> <file> [--audio [chunk_seconds|single]] [--dither <mode>]");
+        setMaxArgs(8);
+        setHelp("/maki play <screen> <file> [--audio [chunk_seconds|single]] [--positional] [--dither <mode>]");
     }
 
     @Override
     public void onExecute(String[] args, CommandSender sender) {
         if (args.length < 3) {
-            sender.sendMessage(MM.deserialize("<red>Usage: /maki play <screen> <file> [--audio [chunk_seconds|single]] [--dither <mode>]"));
+            sender.sendMessage(MM.deserialize("<red>Usage: /maki play <screen> <file> [--audio [chunk_seconds|single]] [--positional] [--dither <mode>]"));
             return;
         }
 
@@ -52,10 +56,11 @@ public class PlayCommand extends ECommand {
 
         // Parse optional flags
         boolean audioFlag = false;
+        boolean positionalAudio = false;
         int chunkDurationMs = AudioManager.DEFAULT_CHUNK_DURATION_MS;
         FrameProcessor.DitheringMode ditheringMode = FrameProcessor.DitheringMode.FLOYD_STEINBERG_REDUCED; // Default
 
-        // Parse arguments for --audio and --dither flags
+        // Parse arguments for --audio, --positional, and --dither flags
         for (int i = 3; i < args.length; i++) {
             if (args[i].equalsIgnoreCase("--audio")) {
                 audioFlag = true;
@@ -79,6 +84,8 @@ public class PlayCommand extends ECommand {
                     }
                     i++; // Skip the chunk duration argument
                 }
+            } else if (args[i].equalsIgnoreCase("--positional")) {
+                positionalAudio = true;
             } else if (args[i].equalsIgnoreCase("--dither")) {
                 if (i + 1 < args.length) {
                     String modeArg = args[i + 1].toUpperCase();
@@ -129,6 +136,7 @@ public class PlayCommand extends ECommand {
         File finalVideoFile = videoFile;
         int finalChunkDurationMs = chunkDurationMs;
         FrameProcessor.DitheringMode finalDitheringMode = ditheringMode;
+        boolean finalPositionalAudio = positionalAudio;
         new BukkitRunnable() {
             @Override
             public void run() {
@@ -141,11 +149,14 @@ public class PlayCommand extends ECommand {
 
                 if (withAudio) {
                     String videoId = finalVideoFile.getName().replaceAll("[^a-zA-Z0-9]", "_").toLowerCase();
-                    audioManager = new AudioManager(plugin, videoId, finalChunkDurationMs);
+                    audioManager = new AudioManager(plugin, videoId, finalChunkDurationMs, screen);
 
                     String modeInfo = audioManager.isSingleFileMode() ? "single file" :
                                      (finalChunkDurationMs / 1000) + "s chunks";
-                    sender.sendMessage(MM.deserialize("<yellow>Extracting audio (" + modeInfo + ")..."));
+                    String audioMode = finalPositionalAudio ? "positional (3D mono)" : "global stereo";
+                    sender.sendMessage(MM.deserialize("<yellow>Extracting audio (" + modeInfo + ", " + audioMode + ")..."));
+
+
                     if (audioManager.extractAndSplitAudio(finalVideoFile)) {
                         File resourcePack = audioManager.generateResourcePack();
                         if (resourcePack != null) {
@@ -204,16 +215,77 @@ public class PlayCommand extends ECommand {
 
                                     Component promptComponent = MM.deserialize(prompt);
 
-                                    for (Player p : Bukkit.getOnlinePlayers()) {
+                                    // Update viewer cache before sending resource pack
+                                    screen.updateViewerCache();
+
+                                    // Collect player UUIDs to track
+                                    Set<UUID> playerIds = new HashSet<>();
+                                    Collection<Player> viewers = screen.getViewers();
+
+                                    if (viewers.isEmpty()) {
+                                        sender.sendMessage(MM.deserialize(
+                                            "<yellow>⚠ No nearby players found to send resource pack to"));
+                                        // Start playback immediately if no viewers
+                                        player.play();
+                                        String audioInfo = withAudio ? "\n<gray>  Audio: <green>✓ Enabled" : "";
+                                        String ditherInfo = "\n<gray>  Dithering: <white>" + formatDitheringMode(finalDitheringMode);
+                                        sender.sendMessage(MM.deserialize(
+                                            "<green>▶ Now playing: <white>" + finalVideoFile.getName() +
+                                            "\n<gray>  On screen: <white>" + screen.getName() +
+                                            "\n<gray>  Duration: <white>" + VideoPlayer.formatDuration(player.getTotalDurationMs()) +
+                                            "\n<gray>  Frame rate: <white>" + String.format("%.1f", player.getFrameRate()) + " fps" +
+                                            ditherInfo +
+                                            audioInfo
+                                        ));
+                                        return;
+                                    }
+
+                                    for (Player p : viewers) {
                                         p.setResourcePack(url, hash, promptComponent, required);
+                                        playerIds.add(p.getUniqueId());
                                     }
 
                                     sender.sendMessage(MM.deserialize(
-                                        "<green>✓ Resource pack sent to all online players"));
+                                        "<green>✓ Resource pack sent to " + playerIds.size() + " nearby player(s)"));
+                                    sender.sendMessage(MM.deserialize(
+                                        "<yellow>⏳ Waiting for players to load resource pack..."));
+
+                                    // Wait for resource pack to load before starting playback
+                                    plugin.getResourcePackListener().trackResourcePackLoad(
+                                        videoId + "_" + System.currentTimeMillis(),
+                                        playerIds,
+                                        (success) -> {
+                                            // Start playback after resource pack is loaded
+                                            new BukkitRunnable() {
+                                                @Override
+                                                public void run() {
+                                                    player.play();
+
+                                                    String audioInfo = withAudio ? "\n<gray>  Audio: <green>✓ Enabled" : "";
+                                                    String ditherInfo = "\n<gray>  Dithering: <white>" + formatDitheringMode(finalDitheringMode);
+                                                    String loadStatus = success ? "<green>✓ Resource pack loaded" : "<yellow>⚠ Started without waiting (timeout)";
+                                                    sender.sendMessage(MM.deserialize(
+                                                        "<green>▶ Now playing: <white>" + finalVideoFile.getName() +
+                                                        "\n<gray>  On screen: <white>" + screen.getName() +
+                                                        "\n<gray>  Duration: <white>" + VideoPlayer.formatDuration(player.getTotalDurationMs()) +
+                                                        "\n<gray>  Frame rate: <white>" + String.format("%.1f", player.getFrameRate()) + " fps" +
+                                                        ditherInfo +
+                                                        audioInfo +
+                                                        "\n<gray>  " + loadStatus
+                                                    ));
+                                                }
+                                            }.runTask(plugin);
+                                        },
+                                        200L // 10 second timeout
+                                    );
+
+                                    // Don't start playback immediately
+                                    return;
                                 }
                             }
                         }
 
+                        // No audio or resource pack not sent
                         player.play();
 
                         String audioInfo = withAudio ? "\n<gray>  Audio: <green>✓ Enabled" : "";
@@ -244,7 +316,7 @@ public class PlayCommand extends ECommand {
             BossBar.Overlay.PROGRESS
         );
 
-        for (Player p : Bukkit.getOnlinePlayers()) {
+        for (Player p : player.getScreen().getViewers()) {
             p.showBossBar(progressBar);
         }
 
