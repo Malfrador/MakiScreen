@@ -71,46 +71,46 @@ tasks {
             include(dependency("com.alibaba:fastjson:.*"))
         }
 
-        relocate("de.erethon.bedrock", "cat.maki.makiscreen.bedrock")
+        relocate("de.erethon.bedrock", "de.erethon.mccinema.bedrock")
         mergeServiceFiles()
     }
 
     bukkit {
         load = BukkitPluginDescription.PluginLoadOrder.STARTUP
-        main = "cat.maki.makiscreen.MakiScreen"
+        main = "de.erethon.mcinema.MCCinema"
         apiVersion = "1.21"
         authors = listOf("Maki", "Malfrador")
 
         permissions {
-            register("makiscreen.create") {
+            register("mccinema.create") {
                 description = "Allows creating screens"
                 default = BukkitPluginDescription.Permission.Default.OP
             }
-            register("makiscreen.delete") {
+            register("mccinema.delete") {
                 description = "Allows deleting screens"
                 default = BukkitPluginDescription.Permission.Default.OP
             }
-            register("makiscreen.play") {
+            register("mccinema.play") {
                 description = "Allows playing videos"
                 default = BukkitPluginDescription.Permission.Default.OP
             }
-            register("makiscreen.control") {
+            register("mccinema.control") {
                 description = "Allows pause/resume/stop/seek"
                 default = BukkitPluginDescription.Permission.Default.OP
             }
-            register("makiscreen.download") {
+            register("mccinema.download") {
                 description = "Allows downloading videos from YouTube"
                 default = BukkitPluginDescription.Permission.Default.OP
             }
-            register("makiscreen.list") {
+            register("mccinema.list") {
                 description = "Allows listing screens and videos"
                 default = BukkitPluginDescription.Permission.Default.TRUE
             }
-            register("makiscreen.info") {
+            register("mccinema.info") {
                 description = "Allows viewing screen info"
                 default = BukkitPluginDescription.Permission.Default.TRUE
             }
-            register("makiscreen.help") {
+            register("mccinema.help") {
                 description = "Allows viewing help"
                 default = BukkitPluginDescription.Permission.Default.TRUE
             }
