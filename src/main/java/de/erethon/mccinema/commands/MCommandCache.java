@@ -5,7 +5,7 @@ import de.erethon.bedrock.plugin.EPlugin;
 
 public class MCommandCache extends ECommandCache {
 
-    public static final String LABEL = "mccinema";
+    public static final String LABEL = "mcc";
 
     public MCommandCache(EPlugin plugin) {
         super(LABEL, plugin);

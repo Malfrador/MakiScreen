@@ -57,7 +57,7 @@ tasks {
     }
 
     reobfJar {
-        outputJar.set(layout.buildDirectory.file("libs/MakiScreen-${project.version}.jar"))
+        outputJar.set(layout.buildDirectory.file("libs/MCCinema-${project.version}.jar"))
     }
 
     shadowJar {
@@ -77,9 +77,10 @@ tasks {
 
     bukkit {
         load = BukkitPluginDescription.PluginLoadOrder.STARTUP
-        main = "de.erethon.mcinema.MCCinema"
+        main = "de.erethon.mccinema.MCCinema"
         apiVersion = "1.21"
         authors = listOf("Maki", "Malfrador")
+        name = "MCCinema"
 
         permissions {
             register("mccinema.create") {
