@@ -15,7 +15,7 @@ plugins {
 }
 
 group = "cat.maki.makiscreen"
-version = "2.1.0"
+version = "2.1.1"
 
 java {
     toolchain.languageVersion.set(JavaLanguageVersion.of(21))
@@ -81,6 +81,7 @@ tasks {
         apiVersion = "1.21"
         authors = listOf("Maki", "Malfrador")
         name = "MCCinema"
+        version = project.version.toString()
 
         permissions {
             register("mccinema.create") {

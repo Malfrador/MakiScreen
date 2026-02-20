@@ -170,12 +170,15 @@ public class PacketDispatcher {
             }
 
             if (useSpatialDownsampling && !isSceneChange && staleness == 0 && changedPixels < MapTile.TOTAL_PIXELS / 4) {
-                // Checkerboard pattern: (x + y + frame) % 2
-                int pattern = (tile.getTileX() + tile.getTileY() + (frameCounter % 2)) % 2;
-                if (pattern != 0) {
-                    // Skip this tile this frame, will update next frame
-                    markUpdateSkipped(update);
-                    continue;
+                // Don't spatially downsample high-contrast tiles, it is very visible on sharp black/white edges
+                if (!isHighContrast(update.dirtyRegion().data())) {
+                    // Checkerboard pattern: (x + y + frame) % 2
+                    int pattern = (tile.getTileX() + tile.getTileY() + (frameCounter % 2)) % 2;
+                    if (pattern != 0) {
+                        // Skip this tile this frame, will update next frame
+                        markUpdateSkipped(update);
+                        continue;
+                    }
                 }
             }
 
@@ -426,6 +429,35 @@ public class PacketDispatcher {
 
         // If very few unique colors, it's likely just noise
         return uniqueColors >= minUniqueColorsThreshold;
+    }
+
+    private boolean isHighContrast(byte[] data) {
+        if (data == null || data.length < 64) {
+            return false;
+        }
+
+        // Count color occurrences using a sampled histogram
+        int[] histogram = new int[256];
+        int step = Math.max(1, data.length / 128);
+        int samples = 0;
+        for (int i = 0; i < data.length; i += step) {
+            histogram[data[i] & 0xFF]++;
+            samples++;
+        }
+
+        // Find the top 2 most common colors
+        int max1 = 0, max2 = 0;
+        for (int count : histogram) {
+            if (count > max1) {
+                max2 = max1;
+                max1 = count;
+            } else if (count > max2) {
+                max2 = count;
+            }
+        }
+
+        // If the top 2 colors cover >80% of samples, it's high contrast
+        return (max1 + max2) > samples * 0.8;
     }
 
     /**

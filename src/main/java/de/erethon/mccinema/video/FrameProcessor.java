@@ -47,6 +47,15 @@ public class FrameProcessor {
     private int[][] ditherBuffer;
     private byte[] previousDitheredFrame;
     private int[] previousSourceHash;
+
+    // Source-resolution buffers for when source != target (persisted across frames)
+    private byte[] sourceDitheredFrameData;
+    private byte[] sourcePreviousDitheredFrame;
+    private int[] sourcePreviousHash;
+    private int[][] sourceDitherBuffer;
+    private int lastSourceWidth = -1;
+    private int lastSourceHeight = -1;
+
     private boolean useTemporalDithering = true;
     private int temporalThreshold = 4;
     private int errorQuantizationBits = 2;
@@ -139,48 +148,56 @@ public class FrameProcessor {
         int sourceWidth = correctedImage.getWidth();
         int sourceHeight = correctedImage.getHeight();
         byte[] sourceFrameData = extractFrameData(correctedImage);
-        byte[] savedDitheredData = ditheredFrameData;
-        byte[] savedPreviousData = previousDitheredFrame;
-        int[] savedPreviousHash = previousSourceHash;
-        int[][] savedDitherBuffer = ditherBuffer;
-        ditheredFrameData = new byte[sourceWidth * sourceHeight];
 
-        if (previousSourceHash.length != sourceWidth * sourceHeight) {
-            previousSourceHash = new int[sourceWidth * sourceHeight];
+        boolean needsUpscale = sourceWidth != targetWidth || sourceHeight != targetHeight;
+
+        if (needsUpscale) {
+            ensureSourceBuffers(sourceWidth, sourceHeight);
+
+            // Swap to source-resolution buffers for dithering
+            byte[] savedDitheredData = ditheredFrameData;
+            byte[] savedPreviousData = previousDitheredFrame;
+            int[] savedPreviousHash = previousSourceHash;
+            int[][] savedDitherBuffer = ditherBuffer;
+
+            ditheredFrameData = sourceDitheredFrameData;
+            previousDitheredFrame = sourcePreviousDitheredFrame;
+            previousSourceHash = sourcePreviousHash;
+            ditherBuffer = sourceDitherBuffer;
+
+            long ditherStart = metrics != null ? System.nanoTime() : 0;
+            ditherFrameAtResolution(sourceFrameData, sourceWidth, sourceHeight);
+            if (metrics != null) {
+                metrics.recordDithering(System.nanoTime() - ditherStart);
+            }
+
+            // Persist source-resolution state for next frame's temporal dithering
+            // Copy current dithered result into the previous-frame buffer for next frame
+            System.arraycopy(ditheredFrameData, 0, sourcePreviousDitheredFrame, 0, ditheredFrameData.length);
+            sourceDitheredFrameData = ditheredFrameData;
+            sourcePreviousHash = previousSourceHash;
+            sourceDitherBuffer = ditherBuffer;
+
+            // Upscale dithered result to target resolution
+            long upscaleStart = metrics != null ? System.nanoTime() : 0;
+            byte[] upscaled = upscalePaletteIndices(ditheredFrameData, sourceWidth, sourceHeight, targetWidth, targetHeight);
+            if (metrics != null) {
+                metrics.recordUpscaling(System.nanoTime() - upscaleStart);
+            }
+
+            // Restore target-resolution buffers and copy upscaled result
+            ditheredFrameData = savedDitheredData;
+            System.arraycopy(upscaled, 0, ditheredFrameData, 0, upscaled.length);
+            previousDitheredFrame = savedPreviousData;
+            previousSourceHash = savedPreviousHash;
+            ditherBuffer = savedDitherBuffer;
+        } else {
+            long ditherStart = metrics != null ? System.nanoTime() : 0;
+            ditherFrameAtResolution(sourceFrameData, sourceWidth, sourceHeight);
+            if (metrics != null) {
+                metrics.recordDithering(System.nanoTime() - ditherStart);
+            }
         }
-
-        previousDitheredFrame = new byte[sourceWidth * sourceHeight];
-
-        ditherBuffer = new int[2][sourceWidth * 3];
-
-        long ditherStart = metrics != null ? System.nanoTime() : 0;
-        ditherFrameAtResolution(sourceFrameData, sourceWidth, sourceHeight);
-        if (metrics != null) {
-            metrics.recordDithering(System.nanoTime() - ditherStart);
-        }
-        byte[] tempSourceDithered = new byte[sourceWidth * sourceHeight];
-        System.arraycopy(ditheredFrameData, 0, tempSourceDithered, 0, tempSourceDithered.length);
-        int[] tempSourceHash = new int[sourceWidth * sourceHeight];
-        System.arraycopy(previousSourceHash, 0, tempSourceHash, 0, tempSourceHash.length);
-
-        long upscaleStart = metrics != null ? System.nanoTime() : 0;
-        byte[] upscaledDithered = upscalePaletteIndices(ditheredFrameData, sourceWidth, sourceHeight, targetWidth, targetHeight);
-        if (metrics != null) {
-            metrics.recordUpscaling(System.nanoTime() - upscaleStart);
-        }
-
-        ditheredFrameData = savedDitheredData;
-        System.arraycopy(upscaledDithered, 0, ditheredFrameData, 0, upscaledDithered.length);
-        previousDitheredFrame = savedPreviousData;
-        if (previousDitheredFrame.length == tempSourceDithered.length) {
-            System.arraycopy(tempSourceDithered, 0, previousDitheredFrame, 0, tempSourceDithered.length);
-        }
-        previousSourceHash = savedPreviousHash;
-        if (previousSourceHash.length == tempSourceHash.length) {
-            System.arraycopy(tempSourceHash, 0, previousSourceHash, 0, tempSourceHash.length);
-        }
-
-        ditherBuffer = savedDitherBuffer;
 
         long tileExtractionStart = metrics != null ? System.nanoTime() : 0;
 
@@ -230,6 +247,23 @@ public class FrameProcessor {
     }
 
     private record TileExtractionResult(MapTile tile, byte[] mapData, MapTile.DirtyRegion dirtyRegion) {
+    }
+
+    /**
+     * Ensure source-resolution buffers are allocated and correctly sized.
+     * Only re-allocates when the source resolution changes.
+     */
+    private void ensureSourceBuffers(int sourceWidth, int sourceHeight) {
+        if (sourceWidth == lastSourceWidth && sourceHeight == lastSourceHeight) {
+            return;
+        }
+        int sourcePixels = sourceWidth * sourceHeight;
+        sourceDitheredFrameData = new byte[sourcePixels];
+        sourcePreviousDitheredFrame = new byte[sourcePixels];
+        sourcePreviousHash = new int[sourcePixels];
+        sourceDitherBuffer = new int[2][sourceWidth * 3];
+        lastSourceWidth = sourceWidth;
+        lastSourceHeight = sourceHeight;
     }
 
     private BufferedImage applyAspectRatioCorrection(BufferedImage source, int targetWidth, int targetHeight) {
