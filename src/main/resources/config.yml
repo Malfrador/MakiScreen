@@ -52,18 +52,25 @@ audio:
   # Audio bitrate for extracted audio (higher = better quality, larger files)
   bitrate: 192000
 
-# Resource Pack Server Settings
+# Resource Pack Hosting Settings
 resourcepack:
-  # Enable built-in resource pack server
+  # Enable resource pack hosting (required for audio playback)
   enabled: true
 
-  # Server address (use your server's public IP or domain)
-  # Players must be able to reach this address
-  address: "localhost"
+  # Hosting mode: MCPACKS or LOCAL
+  # MCPACKS: Uses mcpacks.dev API (recommended, no setup required)
+  # LOCAL: Uses built-in HTTP server (requires port forwarding and configuration)
+  mode: MCPACKS
 
-  # Server port
-  # Make sure this port is open in your firewall and forwarded if needed
-  port: 8080
+  # Local server settings (only used if mode is LOCAL)
+  local:
+    # Server address (use your server's public IP or domain)
+    # Players must be able to reach this address
+    address: "localhost"
+
+    # Server port
+    # Make sure this port is open in your firewall and forwarded if needed
+    port: 8080
 
   # Automatically send resource pack to players when playing video with audio
   auto-apply: true

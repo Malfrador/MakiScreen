@@ -3,7 +3,7 @@ package de.erethon.mccinema;
 import de.erethon.mccinema.commands.MCommandCache;
 import de.erethon.mccinema.dither.DitherLookupUtil;
 import de.erethon.mccinema.download.YoutubeDownloadManager;
-import de.erethon.mccinema.resourcepack.ResourcePackServer;
+import de.erethon.mccinema.resourcepack.ResourcePackManager;
 import de.erethon.mccinema.screen.Screen;
 import de.erethon.mccinema.screen.ScreenManager;
 import de.erethon.mccinema.video.VideoPlayer;
@@ -30,7 +30,7 @@ public final class MCCinema extends EPlugin implements Listener {
     private MCommandCache commands;
 
     private ScreenManager screenManager;
-    private ResourcePackServer resourcePackServer;
+    private ResourcePackManager resourcePackManager;
     private YoutubeDownloadManager youtubeDownloadManager;
     private ResourcePackListener resourcePackListener;
     private final Map<UUID, VideoPlayer> videoPlayers = new ConcurrentHashMap<>();
@@ -51,6 +51,18 @@ public final class MCCinema extends EPlugin implements Listener {
 
         saveDefaultConfig();
         reloadConfig();
+        // Copy any missing keys from the default config (e.g. newly added options)
+        boolean configDirty = false;
+        for (String key : getConfig().getDefaults().getKeys(true)) {
+            if (!getConfig().isSet(key) && !(getConfig().getDefaults().get(key) instanceof org.bukkit.configuration.ConfigurationSection)) {
+                getConfig().set(key, getConfig().getDefaults().get(key));
+                configDirty = true;
+            }
+        }
+        if (configDirty) {
+            saveConfig();
+            logger.info("Config updated with new default values.");
+        }
         new File(getDataFolder(), "videos").mkdirs();
         new File(getDataFolder(), "audio").mkdirs();
         new File(getDataFolder(), "resourcepack").mkdirs();
@@ -64,19 +76,31 @@ public final class MCCinema extends EPlugin implements Listener {
         youtubeDownloadManager = new YoutubeDownloadManager(this);
 
         if (getConfig().getBoolean("resourcepack.enabled", true)) {
-            String address = getConfig().getString("resourcepack.address", "localhost");
-            int port = getConfig().getInt("resourcepack.port", 8080);
+            // Determine hosting mode
+            String modeStr = getConfig().getString("resourcepack.mode", "MCPACKS").toUpperCase();
+            ResourcePackManager.HostingMode mode;
+            try {
+                mode = ResourcePackManager.HostingMode.valueOf(modeStr);
+            } catch (IllegalArgumentException e) {
+                logger.warning("Invalid resourcepack.mode in config: " + modeStr + ", defaulting to MCPACKS");
+                mode = ResourcePackManager.HostingMode.MCPACKS;
+            }
 
-            resourcePackServer = new ResourcePackServer(this, address, port);
-            resourcePackServer.start();
+            String address = getConfig().getString("resourcepack.local.address", "localhost");
+            int port = getConfig().getInt("resourcepack.local.port", 8080);
 
-            logger.info("Resource pack server configuration:");
-            logger.info("  Address: " + address);
-            logger.info("  Port: " + port);
+            resourcePackManager = new ResourcePackManager(this, mode, address, port);
+
+            logger.info("Resource pack configuration:");
+            logger.info("  Mode: " + mode);
+            if (mode == ResourcePackManager.HostingMode.LOCAL) {
+                logger.info("  Local Address: " + address);
+                logger.info("  Local Port: " + port);
+            }
             logger.info("  Auto-apply: " + getConfig().getBoolean("resourcepack.auto-apply", true));
             logger.info("  Required: " + getConfig().getBoolean("resourcepack.required", false));
         } else {
-            logger.info("Resource pack server is disabled in config");
+            logger.info("Resource pack hosting is disabled in config");
         }
 
         commands = new MCommandCache(this);
@@ -95,8 +119,8 @@ public final class MCCinema extends EPlugin implements Listener {
             player.shutdown();
         }
         videoPlayers.clear();
-        if (resourcePackServer != null) {
-            resourcePackServer.stop();
+        if (resourcePackManager != null) {
+            resourcePackManager.shutdown();
         }
         if (screenManager != null) {
             screenManager.saveScreens();
@@ -129,8 +153,8 @@ public final class MCCinema extends EPlugin implements Listener {
         return screenManager;
     }
 
-    public ResourcePackServer getResourcePackServer() {
-        return resourcePackServer;
+    public ResourcePackManager getResourcePackManager() {
+        return resourcePackManager;
     }
 
     public YoutubeDownloadManager getYoutubeDownloadManager() {

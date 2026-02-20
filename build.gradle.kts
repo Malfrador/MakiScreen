@@ -15,10 +15,10 @@ plugins {
 }
 
 group = "cat.maki.makiscreen"
-version = "2.0.1"
+version = "2.1.0"
 
 java {
-    toolchain.languageVersion.set(JavaLanguageVersion.of(25))
+    toolchain.languageVersion.set(JavaLanguageVersion.of(21))
 }
 
 dependencies {
@@ -37,7 +37,7 @@ dependencies {
 
 paperweight {
     javaLauncher = javaToolchains.launcherFor {
-        languageVersion = JavaLanguageVersion.of(25)
+        languageVersion = JavaLanguageVersion.of(21)
     }
 }
 
@@ -48,7 +48,7 @@ tasks {
 
     compileJava {
         options.encoding = "UTF-8"
-        options.release.set(25)
+        options.release.set(21)
         options.compilerArgs.addAll(listOf("--enable-preview"))
     }
 

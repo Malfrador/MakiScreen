@@ -2,13 +2,17 @@ package de.erethon.mccinema.commands;
 
 import de.erethon.mccinema.MCCinema;
 import de.erethon.mccinema.audio.AudioManager;
-import de.erethon.mccinema.resourcepack.ResourcePackServer;
+import de.erethon.mccinema.resourcepack.ResourcePackManager;
 import de.erethon.mccinema.screen.Screen;
 import de.erethon.mccinema.video.FrameProcessor;
 import de.erethon.mccinema.video.VideoPlayer;
 import de.erethon.bedrock.command.ECommand;
 import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.event.ClickEvent;
+import net.kyori.adventure.text.event.HoverEvent;
+import net.kyori.adventure.text.format.NamedTextColor;
+import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.text.minimessage.MiniMessage;
 import org.bukkit.Bukkit;
 import org.bukkit.command.CommandSender;
@@ -160,17 +164,37 @@ public class PlayCommand extends ECommand {
                     if (audioManager.extractAndSplitAudio(finalVideoFile)) {
                         File resourcePack = audioManager.generateResourcePack();
                         if (resourcePack != null) {
-                            // Register resource pack with server
-                            ResourcePackServer rpServer = plugin.getResourcePackServer();
-                            if (rpServer != null) {
-                                rpServer.registerResourcePack(videoId, resourcePack);
+                            // Host resource pack with configured hosting mode
+                            ResourcePackManager rpManager = plugin.getResourcePackManager();
+                            if (rpManager != null) {
+                                java.util.concurrent.atomic.AtomicBoolean uploadStarted = new java.util.concurrent.atomic.AtomicBoolean(false);
+                                ResourcePackManager.HostedResourcePack hostedPack =
+                                    rpManager.hostResourcePack(videoId, resourcePack,
+                                        () -> { uploadStarted.set(true); sender.sendMessage(MM.deserialize("<yellow>Uploading resource pack to mcpacks.dev...")); },
+                                        () -> sender.sendMessage(MM.deserialize("<yellow>Waiting for mcpacks.dev...")));
 
-                                sender.sendMessage(MM.deserialize(
-                                    "<green>✓ Audio resource pack generated and registered!" +
-                                    "\n<gray>Pack URL: <white>" + rpServer.getResourcePackUrl(videoId)));
+                                if (hostedPack != null) {
+                                    if (!uploadStarted.get()) {
+                                        sender.sendMessage(MM.deserialize("<green>✓ Using cached mcpacks.dev upload"));
+                                    }
+                                    sender.sendMessage(MM.deserialize(
+                                        "<green>✓ Audio resource pack ready!" +
+                                        "\n<gray>Mode: <white>" + hostedPack.mode() +
+                                        "\n<gray>URL: ").append(
+                                        Component.text(hostedPack.url())
+                                            .color(NamedTextColor.WHITE)
+                                            .decorate(TextDecoration.UNDERLINED)
+                                            .clickEvent(ClickEvent.openUrl(hostedPack.url()))
+                                            .hoverEvent(HoverEvent.showText(
+                                                Component.text("Click to open URL")))
+                                    ));
+                                } else {
+                                    sender.sendMessage(MM.deserialize(
+                                        "<yellow>⚠ Failed to host resource pack!"));
+                                }
                             } else {
                                 sender.sendMessage(MM.deserialize(
-                                    "<yellow>⚠ Resource pack server is not enabled!" +
+                                    "<yellow>⚠ Resource pack hosting is not enabled!" +
                                     "\n<gray>Enable it in config.yml under 'resourcepack.enabled'"));
                             }
                         }
@@ -204,13 +228,15 @@ public class PlayCommand extends ECommand {
 
                         // Send resource pack to all online players if audio is enabled
                         if (withAudio && finalAudioManager != null) {
-                            ResourcePackServer rpServer = plugin.getResourcePackServer();
-                            if (rpServer != null && plugin.getConfig().getBoolean("resourcepack.auto-apply", true)) {
+                            ResourcePackManager rpManager = plugin.getResourcePackManager();
+                            if (rpManager != null && plugin.getConfig().getBoolean("resourcepack.auto-apply", true)) {
                                 String videoId = finalAudioManager.getVideoId();
-                                String url = rpServer.getResourcePackUrl(videoId);
-                                byte[] hash = rpServer.getResourcePackHash(videoId);
+                                ResourcePackManager.HostedResourcePack hostedPack = rpManager.getHostedPack(videoId);
 
-                                if (hash != null) {
+                                if (hostedPack != null) {
+                                    String url = hostedPack.url();
+                                    byte[] hash = hostedPack.hash();
+
                                     String prompt = plugin.getConfig().getString("resourcepack.prompt",
                                         "<yellow>This video requires a resource pack for audio playback");
                                     boolean required = plugin.getConfig().getBoolean("resourcepack.required", false);
