@@ -197,6 +197,8 @@ public class PlayCommand extends ECommand {
                         player.setOnStateChange(p -> {
                             if (p.getState() == VideoPlayer.State.PLAYING) {
                                 startProgressBar(p);
+                            } else if (p.getState() == VideoPlayer.State.STOPPED || p.getState() == VideoPlayer.State.IDLE) {
+                                stopProgressBar();
                             }
                         });
 

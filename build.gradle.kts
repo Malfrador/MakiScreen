@@ -15,7 +15,7 @@ plugins {
 }
 
 group = "cat.maki.makiscreen"
-version = "2.0.0"
+version = "2.0.1"
 
 java {
     toolchain.languageVersion.set(JavaLanguageVersion.of(25))

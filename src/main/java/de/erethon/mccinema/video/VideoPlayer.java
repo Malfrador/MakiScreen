@@ -257,7 +257,12 @@ public class VideoPlayer {
     }
 
     public void stop() {
-        State previousState = state.getAndSet(State.STOPPED);
+        State previousState = state.get();
+        if (previousState == State.STOPPED || previousState == State.IDLE) {
+            return; // Already stopped
+        }
+
+        state.set(State.STOPPED);
         notifyStateChange();
 
         // Stop the viewer cache updater
@@ -270,16 +275,22 @@ public class VideoPlayer {
         if (audioManager != null) {
             audioManager.stop();
         }
+
+        clearDebugActionBars();
+
         try {
             if (grabber != null) {
                 grabber.setFrameNumber(0);
             }
         } catch (Exception ignored) {}
         currentFrame.set(0);
+
         if (previousState == State.PLAYING || previousState == State.PAUSED) {
             plugin.getLogger().info("Stopped playback");
         }
+
         state.set(State.IDLE);
+        notifyStateChange();
     }
 
     public void seek(long frameNumber) {
@@ -580,6 +591,19 @@ public class VideoPlayer {
             org.bukkit.entity.Player player = org.bukkit.Bukkit.getPlayer(playerId);
             if (player != null && player.isOnline()) {
                 player.sendActionBar(component);
+            }
+        }
+    }
+
+    private void clearDebugActionBars() {
+        if (debugEnabledPlayers.isEmpty()) {
+            return;
+        }
+        Component empty = Component.empty();
+        for (UUID playerId : debugEnabledPlayers) {
+            org.bukkit.entity.Player player = org.bukkit.Bukkit.getPlayer(playerId);
+            if (player != null && player.isOnline()) {
+                player.sendActionBar(empty);
             }
         }
     }
