@@ -226,7 +226,7 @@ public class AudioManager {
     }
 
     private void extractChunksSequentially(File fullAudio, int sampleRate, int channels) throws Exception {
-        plugin.getLogger().info("Extracting chunks using sample-accurate WAV intermediate...");
+        plugin.getLogger().info("Extracting chunks using streaming sample-accurate processing...");
 
         int samplesPerChunk = sampleRate * (chunkDurationMs / 1000);
 
@@ -236,14 +236,17 @@ public class AudioManager {
         File fullWav = new File(audioDir, "full_audio.wav");
         convertToWav(fullAudio, fullWav, sampleRate, channels);
 
-        //Read the WAV and count total samples using grabber timestamps
+        // Stream through the WAV file, accumulating only one chunk at a time
+        // This avoids loading the entire audio into memory (which can be several GB for long videos)
         FFmpegFrameGrabber grabber = new FFmpegFrameGrabber(fullWav);
         grabber.setSampleFormat(avutil.AV_SAMPLE_FMT_S16); // PCM 16-bit for WAV
         grabber.start();
 
-        // Collect all audio samples into a buffer, tracking by grabber timestamp
-        List<float[][]> allSamples = new ArrayList<>();
-        long totalSamplesCollected = 0;
+        // Buffer for the current chunk only (typically a few MB)
+        float[][] chunkBuffer = new float[channels][samplesPerChunk];
+        int chunkBufferPos = 0;
+        int chunkIndex = 0;
+        long totalSamplesProcessed = 0;
 
         Frame frame;
         while ((frame = grabber.grabSamples()) != null) {
@@ -252,78 +255,94 @@ public class AudioManager {
             }
 
             float[][] frameSamples = extractSamplesAsFloat(frame, channels);
-            if (frameSamples != null && frameSamples[0].length > 0) {
-                allSamples.add(frameSamples);
-                totalSamplesCollected += frameSamples[0].length;
+            if (frameSamples == null || frameSamples[0].length == 0) {
+                continue;
+            }
+
+            int frameSampleCount = frameSamples[0].length;
+            int framePos = 0;
+
+            while (framePos < frameSampleCount) {
+                int spaceInChunk = samplesPerChunk - chunkBufferPos;
+                int toCopy = Math.min(spaceInChunk, frameSampleCount - framePos);
+
+                for (int ch = 0; ch < channels; ch++) {
+                    System.arraycopy(frameSamples[ch], framePos, chunkBuffer[ch], chunkBufferPos, toCopy);
+                }
+                chunkBufferPos += toCopy;
+                framePos += toCopy;
+
+                // Chunk buffer is full, flush it
+                if (chunkBufferPos >= samplesPerChunk) {
+                    writeChunk(chunkBuffer, chunkBufferPos, chunkIndex, sampleRate, channels);
+                    totalSamplesProcessed += chunkBufferPos;
+                    chunkIndex++;
+                    chunkBufferPos = 0;
+                    // Re-allocate buffer for next chunk (allows GC of previous data if needed)
+                    chunkBuffer = new float[channels][samplesPerChunk];
+                }
+            }
+        }
+
+        // Handle remaining samples in the last partial chunk
+        if (chunkBufferPos > 0) {
+            // Skip very short final chunks (< 0.5s)
+            if (chunkBufferPos < sampleRate / 2 && chunkIndex > 0) {
+                plugin.getLogger().info("Skipping final chunk with only " + chunkBufferPos + " samples (" +
+                                       (chunkBufferPos * 1000 / sampleRate) + "ms)");
+            } else {
+                // Trim the buffer to actual size
+                float[][] trimmedBuffer = new float[channels][chunkBufferPos];
+                for (int ch = 0; ch < channels; ch++) {
+                    System.arraycopy(chunkBuffer[ch], 0, trimmedBuffer[ch], 0, chunkBufferPos);
+                }
+                writeChunk(trimmedBuffer, chunkBufferPos, chunkIndex, sampleRate, channels);
+                totalSamplesProcessed += chunkBufferPos;
             }
         }
 
         grabber.stop();
         grabber.close();
-
-        plugin.getLogger().info("Collected " + totalSamplesCollected + " total samples from " + allSamples.size() + " frames");
-
-        //  Flatten all samples into one continuous buffer per channel
-        float[][] continuousBuffer = new float[channels][(int) totalSamplesCollected];
-        int writePos = 0;
-        for (float[][] frameSamples : allSamples) {
-            int frameLength = frameSamples[0].length;
-            for (int ch = 0; ch < channels; ch++) {
-                System.arraycopy(frameSamples[ch], 0, continuousBuffer[ch], writePos, frameLength);
-            }
-            writePos += frameLength;
-        }
-        allSamples.clear();
-
-        plugin.getLogger().info("Created continuous buffer with " + writePos + " samples per channel");
-
-        int totalSamples = writePos;
-        int chunkIndex = 0;
-        int samplePos = 0;
-
-        while (samplePos < totalSamples) {
-            int remainingSamples = totalSamples - samplePos;
-            int chunkSamples = Math.min(samplesPerChunk, remainingSamples);
-
-            // Skip very short final chunks
-            if (chunkSamples < sampleRate / 2 && chunkIndex > 0) {
-                plugin.getLogger().info("Skipping final chunk with only " + chunkSamples + " samples (" +
-                                       (chunkSamples * 1000 / sampleRate) + "ms)");
-                break;
-            }
-
-            float[][] chunkBuffer = new float[channels][chunkSamples];
-            for (int ch = 0; ch < channels; ch++) {
-                System.arraycopy(continuousBuffer[ch], samplePos, chunkBuffer[ch], 0, chunkSamples);
-            }
-
-            // Write chunk as WAV first
-            File chunkWav = new File(audioDir, "chunk_" + chunkIndex + ".wav");
-            writeWavFromSamples(chunkWav, chunkBuffer, sampleRate, channels);
-
-            // Convert WAV to OGG
-            File chunkOgg = new File(audioDir, "chunk_" + chunkIndex + ".ogg");
-            convertWavToOgg(chunkWav, chunkOgg, sampleRate, channels);
-
-            // Delete intermediate WAV
-            chunkWav.delete();
-
-            long startMs = (long) chunkIndex * chunkDurationMs;
-            long actualDurationMs = (long) chunkSamples * 1000 / sampleRate;
-            AudioChunk chunk = new AudioChunk(chunkIndex, startMs, actualDurationMs, chunkOgg);
-            chunks.add(chunk);
-
-            plugin.getLogger().info("Created chunk " + chunkIndex +
-                                   " (" + chunkSamples + " samples, " + actualDurationMs + "ms" +
-                                   ", file size: " + chunkOgg.length() + " bytes)");
-
-            chunkIndex++;
-            samplePos += chunkSamples;
-        }
-
         fullWav.delete();
 
-        plugin.getLogger().info("Sample-accurate extraction complete: " + chunks.size() + " chunks created");
+        plugin.getLogger().info("Streaming extraction complete: " + chunks.size() + " chunks created (" +
+                               totalSamplesProcessed + " total samples processed)");
+    }
+
+    /**
+     * Writes a single chunk buffer to WAV, converts to OGG, and registers it.
+     */
+    private void writeChunk(float[][] buffer, int sampleCount, int chunkIndex, int sampleRate, int channels) throws Exception {
+        // Trim buffer if it's not full (last chunk)
+        float[][] writeBuffer;
+        if (sampleCount < buffer[0].length) {
+            writeBuffer = new float[channels][sampleCount];
+            for (int ch = 0; ch < channels; ch++) {
+                System.arraycopy(buffer[ch], 0, writeBuffer[ch], 0, sampleCount);
+            }
+        } else {
+            writeBuffer = buffer;
+        }
+
+        // Write chunk as WAV first
+        File chunkWav = new File(audioDir, "chunk_" + chunkIndex + ".wav");
+        writeWavFromSamples(chunkWav, writeBuffer, sampleRate, channels);
+
+        // Convert WAV to OGG
+        File chunkOgg = new File(audioDir, "chunk_" + chunkIndex + ".ogg");
+        convertWavToOgg(chunkWav, chunkOgg, sampleRate, channels);
+
+        // Delete intermediate WAV
+        chunkWav.delete();
+
+        long startMs = (long) chunkIndex * chunkDurationMs;
+        long actualDurationMs = (long) sampleCount * 1000 / sampleRate;
+        AudioChunk chunk = new AudioChunk(chunkIndex, startMs, actualDurationMs, chunkOgg);
+        chunks.add(chunk);
+
+        plugin.getLogger().info("Created chunk " + chunkIndex +
+                               " (" + sampleCount + " samples, " + actualDurationMs + "ms" +
+                               ", file size: " + chunkOgg.length() + " bytes)");
     }
 
     private void convertToWav(File input, File output, int sampleRate, int channels) throws Exception {
