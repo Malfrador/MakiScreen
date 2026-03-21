@@ -44,15 +44,17 @@ public class FrameProcessor {
     private final int frameHeight;
     private final ExecutorService executor;
     private byte[] ditheredFrameData;
-    private int[][] ditherBuffer;
     private byte[] previousDitheredFrame;
     private int[] previousSourceHash;
+
+    // Pre-allocated error buffers for band-parallel dithering: [numBands*2][width*3]
+    private int[][] bandDitherBuffers;
+    private int bandBufferWidth = -1;
 
     // Source-resolution buffers for when source != target (persisted across frames)
     private byte[] sourceDitheredFrameData;
     private byte[] sourcePreviousDitheredFrame;
     private int[] sourcePreviousHash;
-    private int[][] sourceDitherBuffer;
     private int lastSourceWidth = -1;
     private int lastSourceHeight = -1;
 
@@ -70,7 +72,6 @@ public class FrameProcessor {
         this.ditheredFrameData = new byte[frameWidth * frameHeight];
         this.previousDitheredFrame = new byte[frameWidth * frameHeight];
         this.previousSourceHash = new int[frameWidth * frameHeight];
-        this.ditherBuffer = new int[2][frameWidth * 3];
         loadDitheringConfig(plugin.getConfig());
         int threads = Math.max(2, Runtime.getRuntime().availableProcessors() / 2);
         this.executor = Executors.newFixedThreadPool(threads, r -> {
@@ -158,12 +159,10 @@ public class FrameProcessor {
             byte[] savedDitheredData = ditheredFrameData;
             byte[] savedPreviousData = previousDitheredFrame;
             int[] savedPreviousHash = previousSourceHash;
-            int[][] savedDitherBuffer = ditherBuffer;
 
             ditheredFrameData = sourceDitheredFrameData;
             previousDitheredFrame = sourcePreviousDitheredFrame;
             previousSourceHash = sourcePreviousHash;
-            ditherBuffer = sourceDitherBuffer;
 
             long ditherStart = metrics != null ? System.nanoTime() : 0;
             ditherFrameAtResolution(sourceFrameData, sourceWidth, sourceHeight);
@@ -176,7 +175,6 @@ public class FrameProcessor {
             System.arraycopy(ditheredFrameData, 0, sourcePreviousDitheredFrame, 0, ditheredFrameData.length);
             sourceDitheredFrameData = ditheredFrameData;
             sourcePreviousHash = previousSourceHash;
-            sourceDitherBuffer = ditherBuffer;
 
             // Upscale dithered result to target resolution
             long upscaleStart = metrics != null ? System.nanoTime() : 0;
@@ -190,7 +188,6 @@ public class FrameProcessor {
             System.arraycopy(upscaled, 0, ditheredFrameData, 0, upscaled.length);
             previousDitheredFrame = savedPreviousData;
             previousSourceHash = savedPreviousHash;
-            ditherBuffer = savedDitherBuffer;
         } else {
             long ditherStart = metrics != null ? System.nanoTime() : 0;
             ditherFrameAtResolution(sourceFrameData, sourceWidth, sourceHeight);
@@ -261,7 +258,6 @@ public class FrameProcessor {
         sourceDitheredFrameData = new byte[sourcePixels];
         sourcePreviousDitheredFrame = new byte[sourcePixels];
         sourcePreviousHash = new int[sourcePixels];
-        sourceDitherBuffer = new int[2][sourceWidth * 3];
         lastSourceWidth = sourceWidth;
         lastSourceHeight = sourceHeight;
     }
@@ -535,48 +531,128 @@ public class FrameProcessor {
         }
     }
 
-    private void ditherFrameFloydSteinberg(byte[] frameData, int width, int height, float errorStrength) {
-        int widthMinus = width - 1;
-        int heightMinus = height - 1;
-        int errorStrengthFixed = (int)(errorStrength * 256.0f);
-
-        java.util.Arrays.fill(ditherBuffer[0], 0);
-        java.util.Arrays.fill(ditherBuffer[1], 0);
-
-        ditherSerial(frameData, width, height, widthMinus, heightMinus, errorStrengthFixed);
+    private void ensureBandBuffers(int numBands, int width) {
+        int needed = numBands * 2;
+        if (bandDitherBuffers == null || bandDitherBuffers.length < needed || bandBufferWidth != width) {
+            bandDitherBuffers = new int[needed][];
+            for (int i = 0; i < needed; i++) {
+                bandDitherBuffers[i] = new int[width * 3];
+            }
+            bandBufferWidth = width;
+        }
     }
 
-    
-    private void ditherSerial(byte[] frameData, int width, int height, int widthMinus, int heightMinus, int errorStrengthFixed) {
-        int[] currentRow = ditherBuffer[0];
-        int[] nextRow = ditherBuffer[1];
+    /**
+     * Band-parallel Floyd-Steinberg dithering. Splits the image into horizontal bands,
+     * each processed by a separate thread. Error propagation is contained within each band
+     * (no cross-band propagation), which produces a negligible visual seam at band boundaries
+     * that is imperceptible in motion video.
+     */
+    private void ditherFrameFloydSteinberg(byte[] frameData, int width, int height, float errorStrength) {
+        int widthMinus = width - 1;
+        int errorStrengthFixed = (int) (errorStrength * 256.0f);
 
-        for (int y = 0; y < height; y++) {
-            boolean hasNextY = y < heightMinus;
+        // at least 32 rows per band to minimize seam artifacts
+        int maxBands = Math.max(1, Runtime.getRuntime().availableProcessors() / 2);
+        int numBands = Math.max(1, Math.min(maxBands, height / 32));
+
+        ensureBandBuffers(numBands, width);
+
+        boolean doTemporal = useTemporalDithering;
+        int hashBucket = doTemporal ? Math.max(1, temporalThreshold * 2) : 1;
+        int localTemporalThreshold = temporalThreshold;
+        int errorMask = errorQuantizationBits > 0 ? -(1 << errorQuantizationBits) : 0;
+        int localErrorThreshold = errorThreshold;
+        byte[] prevFrame = previousDitheredFrame;
+        int[] prevHash = previousSourceHash;
+        int prevFrameLength = prevFrame.length;
+        int prevHashLength = prevHash.length;
+        byte[] output = ditheredFrameData;
+
+        if (numBands <= 1) {
+            int[] buf0 = bandDitherBuffers[0];
+            int[] buf1 = bandDitherBuffers[1];
+            java.util.Arrays.fill(buf0, 0);
+            java.util.Arrays.fill(buf1, 0);
+            ditherBand(frameData, width, widthMinus, 0, height, errorStrengthFixed,
+                       buf0, buf1, doTemporal, hashBucket, localTemporalThreshold,
+                       errorMask, localErrorThreshold,
+                       prevFrame, prevHash, prevFrameLength, prevHashLength, output);
+        } else {
+            int bandHeight = height / numBands;
+            Future<?>[] futures = new Future<?>[numBands];
+
+            for (int band = 0; band < numBands; band++) {
+                int startY = band * bandHeight;
+                int endY = (band == numBands - 1) ? height : startY + bandHeight;
+                int[] buf0 = bandDitherBuffers[band * 2];
+                int[] buf1 = bandDitherBuffers[band * 2 + 1];
+
+                futures[band] = executor.submit(() -> {
+                    java.util.Arrays.fill(buf0, 0);
+                    java.util.Arrays.fill(buf1, 0);
+                    ditherBand(frameData, width, widthMinus, startY, endY, errorStrengthFixed,
+                               buf0, buf1, doTemporal, hashBucket, localTemporalThreshold,
+                               errorMask, localErrorThreshold,
+                               prevFrame, prevHash, prevFrameLength, prevHashLength, output);
+                });
+            }
+
+            for (Future<?> f : futures) {
+                try {
+                    f.get();
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+        }
+    }
+
+    private static void ditherBand(byte[] frameData, int width, int widthMinus,
+                                   int startY, int endY, int errorStrengthFixed,
+                                   int[] currentRow, int[] nextRow,
+                                   boolean doTemporal, int hashBucket, int temporalThreshold,
+                                   int errorMask, int errorThreshold,
+                                   byte[] prevFrame, int[] prevHash,
+                                   int prevFrameLength, int prevHashLength,
+                                   byte[] output) {
+        for (int y = startY; y < endY; y++) {
+            boolean hasNextY = (y + 1) < endY; // Only propagate error within this band
             int yIndex = y * width;
+
+            // Swap error buffers
             int[] temp = currentRow;
             currentRow = nextRow;
             nextRow = temp;
             java.util.Arrays.fill(nextRow, 0);
 
             if ((y & 0x1) == 0) {
-                ditherRowForward(frameData, currentRow, nextRow, width, widthMinus, hasNextY, yIndex, errorStrengthFixed);
+                ditherRowForwardOpt(frameData, currentRow, nextRow, width, widthMinus,
+                                    hasNextY, yIndex, errorStrengthFixed,
+                                    doTemporal, hashBucket, temporalThreshold,
+                                    errorMask, errorThreshold,
+                                    prevFrame, prevHash, prevFrameLength, prevHashLength, output);
             } else {
-                ditherRowBackward(frameData, currentRow, nextRow, width, widthMinus, hasNextY, yIndex, errorStrengthFixed);
+                ditherRowBackwardOpt(frameData, currentRow, nextRow, widthMinus,
+                                     hasNextY, yIndex, errorStrengthFixed,
+                                     doTemporal, hashBucket, temporalThreshold,
+                                     errorMask, errorThreshold,
+                                     prevFrame, prevHash, prevFrameLength, prevHashLength, output);
             }
         }
     }
 
-    private void ditherRowForward(byte[] frameData, int[] currentRow, int[] nextRow, int width, int widthMinus, boolean hasNextY, int yIndex, int errorStrengthFixed) {
+    private static void ditherRowForwardOpt(byte[] frameData, int[] currentRow, int[] nextRow,
+                                            int width, int widthMinus, boolean hasNextY, int yIndex,
+                                            int errorStrengthFixed,
+                                            boolean doTemporal, int hashBucket, int temporalThreshold,
+                                            int errorMask, int errorThreshold,
+                                            byte[] prevFrame, int[] prevHash,
+                                            int prevFrameLength, int prevHashLength,
+                                            byte[] output) {
         int bufferIndex = 0;
         int pos = yIndex * 3;
         int pixelIdx = yIndex;
-        boolean doTemporal = useTemporalDithering;
-        byte[] prevFrame = previousDitheredFrame;
-        int[] prevHash = previousSourceHash;
-        int prevFrameLength = prevFrame.length;
-        int prevHashLength = prevHash.length;
-        int errorMask = errorQuantizationBits > 0 ? -(1 << errorQuantizationBits) : 0;
 
         for (int x = 0; x < width; x++, bufferIndex += 3, pos += 3, pixelIdx++) {
             int blue = clamp((frameData[pos] & 0xff) + currentRow[bufferIndex + 2]);
@@ -584,13 +660,12 @@ public class FrameProcessor {
             int red = clamp((frameData[pos + 2] & 0xff) + currentRow[bufferIndex]);
 
             if (doTemporal && pixelIdx < prevFrameLength && pixelIdx < prevHashLength) {
-                int hashBucket = Math.max(1, temporalThreshold * 2);
                 int currentHash = (((red / hashBucket) << 16) |
                                   ((green / hashBucket) << 8) |
                                   (blue / hashBucket)) + 1;
 
                 if (currentHash == prevHash[pixelIdx]) {
-                    ditheredFrameData[pixelIdx] = prevFrame[pixelIdx];
+                    output[pixelIdx] = prevFrame[pixelIdx];
                     continue;
                 }
                 int prevHashValue = prevHash[pixelIdx];
@@ -601,15 +676,15 @@ public class FrameProcessor {
                     if (Math.abs(red - prevR) <= temporalThreshold &&
                         Math.abs(green - prevG) <= temporalThreshold &&
                         Math.abs(blue - prevB) <= temporalThreshold) {
-                        ditheredFrameData[pixelIdx] = prevFrame[pixelIdx];
+                        output[pixelIdx] = prevFrame[pixelIdx];
                         continue;
                     }
                 }
                 prevHash[pixelIdx] = currentHash;
             }
 
-
-            int closest = getBestFullColor(red, green, blue);
+            int lookupIdx = (red >> 1) << 14 | (green >> 1) << 7 | (blue >> 1);
+            int closest = FULL_COLOR_MAP[lookupIdx];
             int closestR = (closest >> 16) & 0xFF;
             int closestG = (closest >> 8) & 0xFF;
             int closestB = closest & 0xFF;
@@ -647,53 +722,53 @@ public class FrameProcessor {
                     }
                 }
             }
-            ditheredFrameData[pixelIdx] = getColor(closest);
+            output[pixelIdx] = COLOR_MAP[lookupIdx];
         }
     }
 
-    private void ditherRowBackward(byte[] frameData, int[] currentRow, int[] nextRow, int width, int widthMinus, boolean hasNextY, int yIndex, int errorStrengthFixed) {
-        boolean doTemporal = useTemporalDithering;
-        byte[] prevFrame = previousDitheredFrame;
-        int[] prevHash = previousSourceHash;
-        int prevFrameLength = prevFrame.length;
-        int prevHashLength = prevHash.length;
-        int errorMask = errorQuantizationBits > 0 ? -(1 << errorQuantizationBits) : 0;
+    private static void ditherRowBackwardOpt(byte[] frameData, int[] currentRow, int[] nextRow,
+                                             int widthMinus, boolean hasNextY, int yIndex,
+                                             int errorStrengthFixed,
+                                             boolean doTemporal, int hashBucket, int temporalThreshold,
+                                             int errorMask, int errorThreshold,
+                                             byte[] prevFrame, int[] prevHash,
+                                             int prevFrameLength, int prevHashLength,
+                                             byte[] output) {
+        int bufferIndex = widthMinus * 3;
+        int pos = (yIndex + widthMinus) * 3;
+        int pixelIdx = yIndex + widthMinus;
 
-        for (int x = widthMinus; x >= 0; x--) {
-            int bufferIndex = x * 3;
-            int pos = (yIndex + x) * 3;
-            int pixelIdx = yIndex + x;
+        for (int x = widthMinus; x >= 0; x--, bufferIndex -= 3, pos -= 3, pixelIdx--) {
             int blue = clamp((frameData[pos] & 0xff) + currentRow[bufferIndex + 2]);
             int green = clamp((frameData[pos + 1] & 0xff) + currentRow[bufferIndex + 1]);
             int red = clamp((frameData[pos + 2] & 0xff) + currentRow[bufferIndex]);
 
             if (doTemporal && pixelIdx < prevFrameLength && pixelIdx < prevHashLength) {
-                int hashBucket = Math.max(1, temporalThreshold * 2);
                 int currentHash = (((red / hashBucket) << 16) |
                                   ((green / hashBucket) << 8) |
                                   (blue / hashBucket)) + 1;
 
                 if (currentHash == prevHash[pixelIdx]) {
-                    ditheredFrameData[pixelIdx] = prevFrame[pixelIdx];
+                    output[pixelIdx] = prevFrame[pixelIdx];
                     continue;
                 }
-
                 int prevHashValue = prevHash[pixelIdx];
                 if (prevHashValue > 0) {
                     int prevR = ((prevHashValue - 1) >> 16) * hashBucket;
                     int prevG = (((prevHashValue - 1) >> 8) & 0xFF) * hashBucket;
                     int prevB = ((prevHashValue - 1) & 0xFF) * hashBucket;
-
                     if (Math.abs(red - prevR) <= temporalThreshold &&
                         Math.abs(green - prevG) <= temporalThreshold &&
                         Math.abs(blue - prevB) <= temporalThreshold) {
-                        ditheredFrameData[pixelIdx] = prevFrame[pixelIdx];
+                        output[pixelIdx] = prevFrame[pixelIdx];
                         continue;
                     }
                 }
                 prevHash[pixelIdx] = currentHash;
             }
-            int closest = getBestFullColor(red, green, blue);
+
+            int lookupIdx = (red >> 1) << 14 | (green >> 1) << 7 | (blue >> 1);
+            int closest = FULL_COLOR_MAP[lookupIdx];
             int closestR = (closest >> 16) & 0xFF;
             int closestG = (closest >> 8) & 0xFF;
             int closestB = closest & 0xFF;
@@ -734,7 +809,7 @@ public class FrameProcessor {
                     }
                 }
             }
-            ditheredFrameData[pixelIdx] = getColor(closest);
+            output[pixelIdx] = COLOR_MAP[lookupIdx];
         }
     }
 

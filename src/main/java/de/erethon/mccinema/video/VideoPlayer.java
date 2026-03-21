@@ -56,10 +56,16 @@ public class VideoPlayer {
     private long playbackStartTime;
     private long pausedAtFrame;
 
+    // A/V sync: if video falls this far behind audio (in ns), skip frames to catch up.
+    // 150ms ≈ 3 frames at 20fps — small enough to prevent perceptible desync,
+    // large enough to tolerate normal processing jitter.
+    private static final long AV_SYNC_THRESHOLD_NS = 150_000_000L;
+
     // Stats
     private final AtomicLong framesProcessed = new AtomicLong(0);
     private final AtomicLong framesSkipped = new AtomicLong(0);
     private long lastFrameTime;
+    private volatile long lastDriftNanos = 0; // For debug HUD
 
     // Debug metrics
     private final Set<UUID> debugEnabledPlayers = Collections.synchronizedSet(new HashSet<>());
@@ -358,6 +364,31 @@ public class VideoPlayer {
         }
         long frameStartTime = System.nanoTime();
         try {
+            // Audio plays at real-time speed via client-side OGG playback, so
+            // wall-clock time (relative to playbackStartTime) is the reference clock.
+            long elapsedNanos = frameStartTime - playbackStartTime;
+            long videoPositionNanos = (long)(currentFrame.get() / frameRate * 1_000_000_000.0);
+            long driftNanos = elapsedNanos - videoPositionNanos;
+            lastDriftNanos = driftNanos;
+
+            if (driftNanos > AV_SYNC_THRESHOLD_NS) {
+                // Calculate which frame we SHOULD be displaying right now
+                long targetFrame = (long)(elapsedNanos / 1_000_000_000.0 * frameRate);
+                long total = totalFrames.get();
+                if (targetFrame >= total) {
+                    targetFrame = total - 1;
+                }
+                long currentFrameNum = currentFrame.get();
+                long framesToSkip = targetFrame - currentFrameNum;
+                if (framesToSkip > 0) {
+                    grabber.setFrameNumber((int) targetFrame);
+                    currentFrame.set(targetFrame);
+                    framesSkipped.addAndGet(framesToSkip);
+                    plugin.getLogger().fine("A/V sync: skipped " + framesToSkip + " frames " +
+                        "(drift: " + (driftNanos / 1_000_000) + "ms, jumped to frame " + targetFrame + ")");
+                }
+            }
+
             // Stage 1: Decode frame from video
             long decodeStart = System.nanoTime();
             Frame frame = grabber.grabImage();
@@ -367,7 +398,7 @@ public class VideoPlayer {
                 return currentFrame.get();
             }
             performanceMetrics.recordFrameDecode(decodeEnd - decodeStart);
-            long frameNum = currentFrame.incrementAndGet();
+            long frameNum = currentFrame.getAndIncrement();
 
             // Stage 2: Convert to BufferedImage
             long conversionStart = System.nanoTime();
@@ -574,7 +605,8 @@ public class VideoPlayer {
             "<yellow>D:%.1f</yellow> <gold>Di:%.1f</gold> <gold>U:%.1f</gold> <aqua>Ti:%.1f</aqua>" +
             "<dark_gray>]</dark_gray> " +
             "<dark_gray>|</dark_gray> BW: <white>%s/s</white> " +
-            "<dark_gray>|</dark_gray> <light_purple>Stab:<white>%.0f%%</white> Dirty:<white>%d</white>/<green>%d</green></light_purple>",
+            "<dark_gray>|</dark_gray> <light_purple>Stab:<white>%.0f%%</white> Dirty:<white>%d</white>/<green>%d</green></light_purple>" +
+            " <dark_gray>|</dark_gray> %s",
             debugCurrentFps,
             total / 1000.0,
             decode / 1000.0,
@@ -584,7 +616,8 @@ public class VideoPlayer {
             formatBytes(bytesPerSecond),
             stability,
             dirtyTiles,
-            totalTiles
+            totalTiles,
+            formatDriftTag(lastDriftNanos)
         );
         Component component = MiniMessage.miniMessage().deserialize(message);
         for (UUID playerId : debugEnabledPlayers) {
@@ -616,6 +649,19 @@ public class VideoPlayer {
         } else {
             return String.format("%.2fMB", bytes / (1024.0 * 1024.0));
         }
+    }
+
+    private static String formatDriftTag(long driftNanos) {
+        long driftMs = driftNanos / 1_000_000;
+        String color;
+        if (Math.abs(driftMs) < 50) {
+            color = "green";
+        } else if (Math.abs(driftMs) < 150) {
+            color = "yellow";
+        } else {
+            color = "red";
+        }
+        return "<" + color + ">Drift:<white>" + driftMs + "ms</white></" + color + ">";
     }
 }
 
