@@ -43,20 +43,27 @@ public class DownloadCommand extends ECommand {
             return;
         }
 
-        String videoIdOrUrl = args[1];
+        String videoIdOrUrl = null;
         String customName = null;
         boolean convertFps = plugin.getConfig().getBoolean("youtube.auto-convert-fps", true);
         boolean acceptConsent = false;
 
-        // Parse arguments
-        for (int i = 2; i < args.length; i++) {
+        // Parse arguments - flags can appear at any position
+        for (int i = 1; i < args.length; i++) {
             if (args[i].equalsIgnoreCase("--no-convert")) {
                 convertFps = false;
             } else if (args[i].equalsIgnoreCase("--accept")) {
                 acceptConsent = true;
+            } else if (videoIdOrUrl == null) {
+                videoIdOrUrl = args[i];
             } else if (customName == null) {
                 customName = args[i];
             }
+        }
+
+        if (videoIdOrUrl == null) {
+            sender.sendMessage(MM.deserialize("<red>Usage: /mcc download <youtube-url|video-id> [filename] [--no-convert]"));
+            return;
         }
 
         YoutubeDownloadManager downloadManager = plugin.getYoutubeDownloadManager();

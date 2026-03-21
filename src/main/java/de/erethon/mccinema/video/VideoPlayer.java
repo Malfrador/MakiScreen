@@ -61,6 +61,10 @@ public class VideoPlayer {
     // large enough to tolerate normal processing jitter.
     private static final long AV_SYNC_THRESHOLD_NS = 150_000_000L;
 
+    // Epoch counter incremented on seek/resume to invalidate in-flight tasks
+    // that were scheduled before the seek. Prevents stale rescheduling races.
+    private final AtomicLong playbackEpoch = new AtomicLong(0);
+
     // Stats
     private final AtomicLong framesProcessed = new AtomicLong(0);
     private final AtomicLong framesSkipped = new AtomicLong(0);
@@ -319,6 +323,8 @@ public class VideoPlayer {
                 if (playbackTask != null) {
                     playbackTask.cancel(false);
                 }
+                // Bump epoch so any in-flight processNextFrameAdaptive won't reschedule
+                playbackEpoch.incrementAndGet();
                 // Schedule from frameNumber - 1 because processNextFrame will increment currentFrame
                 scheduleNextFrame(frameNumber - 1);
             }
@@ -354,8 +360,12 @@ public class VideoPlayer {
     }
 
     private void processNextFrameAdaptive() {
+        long epoch = playbackEpoch.get();
         long currentFrameNumber = processNextFrame();
-        scheduleNextFrame(currentFrameNumber);
+        // Only reschedule if no seek/resume happened during processing
+        if (playbackEpoch.get() == epoch) {
+            scheduleNextFrame(currentFrameNumber);
+        }
     }
 
     private long processNextFrame() {
@@ -387,6 +397,12 @@ public class VideoPlayer {
                     plugin.getLogger().fine("A/V sync: skipped " + framesToSkip + " frames " +
                         "(drift: " + (driftNanos / 1_000_000) + "ms, jumped to frame " + targetFrame + ")");
                 }
+            } else if (driftNanos < -AV_SYNC_THRESHOLD_NS) {
+                // Video is ahead of the audio clock (e.g. after a seek race condition).
+                // Re-anchor the playback start time so drift resets to zero.
+                // The scheduling will naturally insert the correct delay for the next frame.
+                playbackStartTime = frameStartTime - videoPositionNanos;
+                lastDriftNanos = 0;
             }
 
             // Stage 1: Decode frame from video
