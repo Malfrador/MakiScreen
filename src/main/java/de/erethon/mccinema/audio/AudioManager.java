@@ -40,6 +40,7 @@ public class AudioManager {
     private final File audioDir;
     private final List<AudioChunk> chunks = new ArrayList<>();
     private final int chunkDurationMs; // 0 = single file mode
+    private final boolean positionalAudio; // true = mono (3D positional), false = stereo (global)
 
     private final AtomicInteger currentChunkIndex = new AtomicInteger(-1);
     private final AtomicBoolean isPlaying = new AtomicBoolean(false);
@@ -52,15 +53,18 @@ public class AudioManager {
     /**
      * Creates an AudioManager with configurable chunk duration.
      * @param chunkDurationMs Duration of each chunk in milliseconds. Use 0 for single file mode (no chunking).
+     * @param positionalAudio If true, audio is extracted as mono for 3D positional playback. If false, stereo is kept for global playback.
      */
-    public AudioManager(MCCinema plugin, String videoId, int chunkDurationMs, Screen screen) {
+    public AudioManager(MCCinema plugin, String videoId, int chunkDurationMs, boolean positionalAudio, Screen screen) {
         this.plugin = plugin;
         this.videoId = videoId;
         this.chunkDurationMs = chunkDurationMs;
+        this.positionalAudio = positionalAudio;
         this.screen = screen;
-        // Include chunk duration in folder name to separate cached files
-        String folderSuffix = chunkDurationMs == 0 ? "_single" : "_" + chunkDurationMs + "ms";
-        this.audioDir = new File(plugin.getDataFolder(), "audio/" + videoId + folderSuffix);
+        // Include chunk duration and audio mode in folder name to separate cached files
+        String chunkSuffix = chunkDurationMs == 0 ? "_single" : "_" + chunkDurationMs + "ms";
+        String audioSuffix = positionalAudio ? "_mono" : "_stereo";
+        this.audioDir = new File(plugin.getDataFolder(), "audio/" + videoId + chunkSuffix + audioSuffix);
     }
 
     public int getChunkDurationMs() {
@@ -141,6 +145,14 @@ public class AudioManager {
                 plugin.getLogger().info("Multi-channel audio detected (" + channels + " channels). " +
                                        "Downmixing to stereo for compatibility.");
                 outputChannels = 2;
+            }
+
+            // For positional audio, use mono — Minecraft plays stereo sounds globally regardless of
+            // location, while mono sounds are attenuated by distance for true 3D positioning.
+            if (positionalAudio && outputChannels > 1) {
+                plugin.getLogger().info("Positional audio mode: downmixing " + outputChannels +
+                                       " channels to mono for 3D positioning.");
+                outputChannels = 1;
             }
 
             // Extract full audio first as OGG
@@ -483,6 +495,19 @@ public class AudioManager {
         }
 
         File packDir = new File(plugin.getDataFolder(), "resourcepack");
+
+        // Always start with a clean pack directory so that audio from previously-played
+        // videos does not accumulate and end up in this video's resource pack zip.
+        if (packDir.exists()) {
+            try {
+                Files.walk(packDir.toPath())
+                    .sorted(Comparator.reverseOrder())
+                    .forEach(p -> p.toFile().delete());
+            } catch (IOException e) {
+                plugin.getLogger().warning("Failed to clean resource pack directory: " + e.getMessage());
+            }
+        }
+
         File soundsDir = new File(packDir, "assets/" + SOUND_NAMESPACE + "/sounds/" + videoId);
         soundsDir.mkdirs();
 
