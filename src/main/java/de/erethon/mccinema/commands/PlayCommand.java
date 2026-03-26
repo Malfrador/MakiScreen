@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class PlayCommand extends ECommand {
 
@@ -146,6 +147,9 @@ public class PlayCommand extends ECommand {
             public void run() {
                 VideoPlayer player = new VideoPlayer(plugin, screen);
 
+                // Always start playback in balanced preset unless the command overrides specific knobs.
+                QualityCommand.applyBalancedPreset(player);
+
                 // Set dithering mode before processing any frames
                 player.getFrameProcessor().setDitheringMode(finalDitheringMode);
 
@@ -153,7 +157,7 @@ public class PlayCommand extends ECommand {
 
                 if (withAudio) {
                     String videoId = finalVideoFile.getName().replaceAll("[^a-zA-Z0-9]", "_").toLowerCase();
-                    audioManager = new AudioManager(plugin, videoId, finalChunkDurationMs, screen);
+                    audioManager = new AudioManager(plugin, videoId, finalChunkDurationMs, finalPositionalAudio, screen);
 
                     String modeInfo = audioManager.isSingleFileMode() ? "single file" :
                                      (finalChunkDurationMs / 1000) + "s chunks";
@@ -167,7 +171,7 @@ public class PlayCommand extends ECommand {
                             // Host resource pack with configured hosting mode
                             ResourcePackManager rpManager = plugin.getResourcePackManager();
                             if (rpManager != null) {
-                                java.util.concurrent.atomic.AtomicBoolean uploadStarted = new java.util.concurrent.atomic.AtomicBoolean(false);
+                                AtomicBoolean uploadStarted = new AtomicBoolean(false);
                                 ResourcePackManager.HostedResourcePack hostedPack =
                                     rpManager.hostResourcePack(videoId, resourcePack,
                                         () -> { uploadStarted.set(true); sender.sendMessage(MM.deserialize("<yellow>Uploading resource pack to mcpacks.dev...")); },
@@ -390,6 +394,8 @@ public class PlayCommand extends ECommand {
         return switch (mode) {
             case FLOYD_STEINBERG -> "Floyd-Steinberg (High Quality)";
             case FLOYD_STEINBERG_REDUCED -> "Floyd-Steinberg Reduced (Default)";
+            case ATKINSON -> "Atkinson (Cleaner, Less Noise)";
+            case STUCKI -> "Stucki (Smoother Gradients)";
             case BAYER_8X8 -> "Bayer 8x8 (Low Noise)";
             case NONE -> "None (Fastest)";
         };

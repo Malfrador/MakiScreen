@@ -43,6 +43,42 @@ performance:
     # Range: 2-10, Recommended: 3-4
     min-unique-colors: 3
 
+    # Patch strategy for map updates:
+    # BOUNDING_BOX = one patch per tile (default)
+    # MULTI_REGION = split sparse changes into multiple map patches
+    # FULL_MAP = always send full 128x128 map data
+    patching:
+      strategy: MULTI_REGION
+
+      # Block size used while grouping changed pixels for MULTI_REGION
+      # Lower values find tighter patches and usually reduce bandwidth further
+      multi-region-block-size: 8
+
+      # Hard cap for number of patches sent per tile in MULTI_REGION
+      # Higher values improve compression for sparse noise/motion at some CPU cost
+      max-patches-per-tile: 24
+
+      # Ignore tiny patch components below this area (pixels)
+      # Range: 1-16384
+      min-patch-area: 16
+
+      # Approximate packet overhead per patch for split-vs-single heuristic
+      # Set low when bundles are used and only bandwidth matters
+      packet-overhead-bytes: 0
+
+    # Hard bandwidth ceiling (payload bytes per second)
+    # 20 MB/s target means ~1.0 MB/frame at 20 FPS
+    target:
+      enabled: false
+      bytes-per-second: 20971520
+
+    # Adaptive bandwidth behavior based on analyzed frame content
+    adaptive:
+      # Motion score where frame is considered high-motion (0.0 - 1.0)
+      high-motion-threshold: 0.12
+      # Flatness threshold used to allow smaller patch areas in flat scenes
+      flat-threshold: 0.70
+
 # Audio Settings
 audio:
   # Duration of each audio chunk in milliseconds
@@ -123,6 +159,23 @@ dithering:
     # Lower values = finer error propagation = better quality
     # Recommended: 3-4 for compression, 1-2 for quality
     error-quantization-bits: 2
+
+  # Content-aware adaptive tuning for reducing dither churn and bandwidth.
+  adaptive:
+    enabled: true
+    high-motion-threshold: 0.12
+    low-motion-threshold: 0.05
+    flat-area-threshold: 0.70
+    motion:
+      temporal-threshold-boost: 6
+      error-quantization-boost: 1
+      error-threshold-boost: 4
+      diffusion-scale: 0.80
+    flat:
+      temporal-threshold-boost: 10
+      error-quantization-boost: 2
+      error-threshold-boost: 8
+      diffusion-scale: 0.65
 
 # Default screen settings
 defaults:

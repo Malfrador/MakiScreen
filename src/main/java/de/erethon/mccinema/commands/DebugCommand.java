@@ -3,6 +3,7 @@ package de.erethon.mccinema.commands;
 import de.erethon.mccinema.MCCinema;
 import de.erethon.mccinema.screen.Screen;
 import de.erethon.mccinema.video.FrameProcessor;
+import de.erethon.mccinema.video.PacketDispatcher;
 import de.erethon.mccinema.video.VideoPlayer;
 import de.erethon.bedrock.command.ECommand;
 import net.kyori.adventure.text.minimessage.MiniMessage;
@@ -37,7 +38,7 @@ public class DebugCommand extends ECommand {
 
         if (args.length < 2) {
             sender.sendMessage(MM.deserialize("<red>Usage: /mcc debug <screen> [setting] [value]"));
-            sender.sendMessage(MM.deserialize("<gray>Settings: show, output-stability, motion-adaptive, luminance-adaptive, stability-bias"));
+            sender.sendMessage(MM.deserialize("<gray>Settings: show, temporal, mode, patch-mode, max-patches, patch-block-size, min-patch-area, full-update-threshold"));
             return;
         }
 
@@ -66,9 +67,10 @@ public class DebugCommand extends ECommand {
         // Handle settings
         String setting = args[2].toLowerCase();
         FrameProcessor processor = videoPlayer.getFrameProcessor();
+        PacketDispatcher dispatcher = videoPlayer.getPacketDispatcher();
 
         switch (setting) {
-            case "show", "status" -> showOptimizationStatus(sender, processor, screenName);
+            case "show", "status" -> showOptimizationStatus(sender, processor, dispatcher, screenName);
             case "temporal", "temp" -> {
                 if (args.length == 3) {
                     boolean newValue = !processor.isUsingTemporalDithering();
@@ -125,22 +127,84 @@ public class DebugCommand extends ECommand {
             case "mode", "dither-mode", "dm" -> {
                 if (args.length < 4) {
                     sender.sendMessage(MM.deserialize("<yellow>Current dithering mode: <white>" + processor.getDitheringMode()));
-                    sender.sendMessage(MM.deserialize("<gray>Available: FLOYD_STEINBERG, FLOYD_STEINBERG_REDUCED, BAYER_8X8, NONE"));
+                    sender.sendMessage(MM.deserialize("<gray>Available: FLOYD_STEINBERG, FLOYD_STEINBERG_REDUCED, ATKINSON, STUCKI, BAYER_8X8, NONE"));
                 } else {
                     try {
                         FrameProcessor.DitheringMode mode = FrameProcessor.DitheringMode.valueOf(args[3].toUpperCase());
                         processor.setDitheringMode(mode);
                         sender.sendMessage(MM.deserialize("<green>Dithering mode set to: <white>" + mode));
                     } catch (IllegalArgumentException e) {
-                        sender.sendMessage(MM.deserialize("<red>Invalid mode. Available: FLOYD_STEINBERG, FLOYD_STEINBERG_REDUCED, BAYER_8X8, NONE"));
+                        sender.sendMessage(MM.deserialize("<red>Invalid mode. Available: FLOYD_STEINBERG, FLOYD_STEINBERG_REDUCED, ATKINSON, STUCKI, BAYER_8X8, NONE"));
+                    }
+                }
+            }
+            case "patch-mode", "patch", "pm" -> {
+                if (args.length < 4) {
+                    sender.sendMessage(MM.deserialize("<yellow>Current patch mode: <white>" + dispatcher.getPatchStrategy()));
+                    sender.sendMessage(MM.deserialize("<gray>Available: BOUNDING_BOX, MULTI_REGION, FULL_MAP"));
+                } else if (dispatcher.setPatchStrategy(args[3])) {
+                    sender.sendMessage(MM.deserialize("<green>Patch mode set to: <white>" + dispatcher.getPatchStrategy()));
+                } else {
+                    sender.sendMessage(MM.deserialize("<red>Invalid patch mode. Available: BOUNDING_BOX, MULTI_REGION, FULL_MAP"));
+                }
+            }
+            case "max-patches", "patch-limit", "mpl" -> {
+                if (args.length < 4) {
+                    sender.sendMessage(MM.deserialize("<yellow>Current max patches per tile: <white>" + dispatcher.getMaxPatchesPerTile()));
+                    sender.sendMessage(MM.deserialize("<gray>Usage: /mcc debug " + screenName + " max-patches <1-64>"));
+                } else {
+                    try {
+                        dispatcher.setMaxPatchesPerTile(Integer.parseInt(args[3]));
+                        sender.sendMessage(MM.deserialize("<green>Max patches per tile set to: <white>" + dispatcher.getMaxPatchesPerTile()));
+                    } catch (NumberFormatException e) {
+                        sender.sendMessage(MM.deserialize("<red>Invalid number: " + args[3]));
+                    }
+                }
+            }
+            case "patch-block-size", "pbs" -> {
+                if (args.length < 4) {
+                    sender.sendMessage(MM.deserialize("<yellow>Current patch block size: <white>" + dispatcher.getMultiRegionBlockSize()));
+                    sender.sendMessage(MM.deserialize("<gray>Usage: /mcc debug " + screenName + " patch-block-size <4-32>"));
+                } else {
+                    try {
+                        dispatcher.setMultiRegionBlockSize(Integer.parseInt(args[3]));
+                        sender.sendMessage(MM.deserialize("<green>Patch block size set to: <white>" + dispatcher.getMultiRegionBlockSize()));
+                    } catch (NumberFormatException e) {
+                        sender.sendMessage(MM.deserialize("<red>Invalid number: " + args[3]));
+                    }
+                }
+            }
+            case "min-patch-area", "mpa" -> {
+                if (args.length < 4) {
+                    sender.sendMessage(MM.deserialize("<yellow>Current min patch area: <white>" + dispatcher.getMinPatchArea()));
+                    sender.sendMessage(MM.deserialize("<gray>Usage: /mcc debug " + screenName + " min-patch-area <1-16384>"));
+                } else {
+                    try {
+                        dispatcher.setMinPatchArea(Integer.parseInt(args[3]));
+                        sender.sendMessage(MM.deserialize("<green>Min patch area set to: <white>" + dispatcher.getMinPatchArea()));
+                    } catch (NumberFormatException e) {
+                        sender.sendMessage(MM.deserialize("<red>Invalid number: " + args[3]));
+                    }
+                }
+            }
+            case "full-update-threshold", "fut" -> {
+                if (args.length < 4) {
+                    sender.sendMessage(MM.deserialize("<yellow>Current full update threshold: <white>" + dispatcher.getFullUpdateThresholdPercent() + "%"));
+                    sender.sendMessage(MM.deserialize("<gray>Usage: /mcc debug " + screenName + " full-update-threshold <1-100>"));
+                } else {
+                    try {
+                        dispatcher.setFullUpdateThresholdPercent(Integer.parseInt(args[3]));
+                        sender.sendMessage(MM.deserialize("<green>Full update threshold set to: <white>" + dispatcher.getFullUpdateThresholdPercent() + "%"));
+                    } catch (NumberFormatException e) {
+                        sender.sendMessage(MM.deserialize("<red>Invalid number: " + args[3]));
                     }
                 }
             }
             default -> {
                 sender.sendMessage(MM.deserialize("<red>Unknown setting: " + setting));
                 sender.sendMessage(MM.deserialize("<gray>Available settings:"));
-                sender.sendMessage(MM.deserialize("<gray>  show, output-stability, motion-adaptive, luminance-adaptive, temporal"));
-                sender.sendMessage(MM.deserialize("<gray>  stability-bias, error-threshold, temporal-threshold, error-diffusion, mode"));
+                sender.sendMessage(MM.deserialize("<gray>  show, temporal, error-threshold, temporal-threshold, error-diffusion, mode"));
+                sender.sendMessage(MM.deserialize("<gray>  patch-mode, max-patches, patch-block-size, min-patch-area, full-update-threshold"));
             }
         }
     }
@@ -160,7 +224,7 @@ public class DebugCommand extends ECommand {
         }
     }
 
-    private void showOptimizationStatus(CommandSender sender, FrameProcessor processor, String screenName) {
+    private void showOptimizationStatus(CommandSender sender, FrameProcessor processor, PacketDispatcher dispatcher, String screenName) {
         sender.sendMessage(MM.deserialize("<gold>===== Optimization Settings for <white>" + screenName + "</white> ====="));
         sender.sendMessage(MM.deserialize("<gray>Dithering Mode: <white>" + processor.getDitheringMode()));
         sender.sendMessage(MM.deserialize("<gray>Error Diffusion Strength: <white>" + String.format("%.2f", processor.getErrorDiffusionStrength())));
@@ -169,6 +233,13 @@ public class DebugCommand extends ECommand {
         sender.sendMessage(MM.deserialize("<yellow>Temporal Optimizations:"));
         sender.sendMessage(MM.deserialize("<gray>  Temporal Dithering: " + formatBoolean(processor.isUsingTemporalDithering())));
         sender.sendMessage(MM.deserialize("<gray>  Temporal Threshold: <white>" + processor.getTemporalThreshold()));
+        sender.sendMessage(MM.deserialize(""));
+        sender.sendMessage(MM.deserialize("<aqua>Patch Optimizations:"));
+        sender.sendMessage(MM.deserialize("<gray>  Mode: <white>" + dispatcher.getPatchStrategy()));
+        sender.sendMessage(MM.deserialize("<gray>  Full Update Threshold: <white>" + dispatcher.getFullUpdateThresholdPercent() + "%"));
+        sender.sendMessage(MM.deserialize("<gray>  Max Patches/Tile: <white>" + dispatcher.getMaxPatchesPerTile()));
+        sender.sendMessage(MM.deserialize("<gray>  Patch Block Size: <white>" + dispatcher.getMultiRegionBlockSize()));
+        sender.sendMessage(MM.deserialize("<gray>  Min Patch Area: <white>" + dispatcher.getMinPatchArea()));
         sender.sendMessage(MM.deserialize(""));
         sender.sendMessage(MM.deserialize("<aqua>Tip: Toggle with /mcc debug " + screenName + " <setting>"));
     }

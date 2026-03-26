@@ -24,6 +24,12 @@ public class FrameProcessor {
     public enum DitheringMode {
         FLOYD_STEINBERG,
         FLOYD_STEINBERG_REDUCED,
+        /** Atkinson dithering: distributes only 6/8 of the error to 6 neighbours (including 2 rows below).
+         *  The discarded 2/8 naturally suppresses noise in flat areas, giving a cleaner look than FS. */
+        ATKINSON,
+        /** Stucki dithering: distributes 100% of error to 12 neighbours across the next 2 rows.
+         *  The wider spread reduces directional streaking and produces smoother gradients than FS. */
+        STUCKI,
         BAYER_8X8,
         NONE
     }
@@ -65,6 +71,25 @@ public class FrameProcessor {
     private float errorDiffusionStrength = 0.8f;
     private int errorThreshold = 4;
 
+    // Bandwidth-first adaptive tuning (content-aware dithering stabilization)
+    private boolean adaptiveTuningEnabled = true;
+    private double adaptiveHighMotionThreshold = 0.12;
+    private double adaptiveLowMotionThreshold = 0.05;
+    private double adaptiveFlatAreaThreshold = 0.70;
+    private int adaptiveTemporalBoostMotion = 6;
+    private int adaptiveTemporalBoostFlat = 10;
+    private int adaptiveQuantBoostMotion = 1;
+    private int adaptiveQuantBoostFlat = 2;
+    private int adaptiveErrorThresholdBoostMotion = 4;
+    private int adaptiveErrorThresholdBoostFlat = 8;
+    private float adaptiveDiffusionScaleMotion = 0.80f;
+    private float adaptiveDiffusionScaleFlat = 0.65f;
+    private byte[] previousRawFrameData;
+    private int previousRawWidth = -1;
+    private int previousRawHeight = -1;
+    private volatile FrameContentStats lastFrameContentStats = new FrameContentStats(0.0, 0.0, 0.0);
+    private volatile AdaptiveDitherProfile lastAdaptiveProfile = new AdaptiveDitherProfile(4, 2, 4, 0.8f, "BASE");
+
     public FrameProcessor(Screen screen, Plugin plugin) {
         this.screen = screen;
         this.frameWidth = screen.getPixelWidth();
@@ -98,6 +123,19 @@ public class FrameProcessor {
             config.getInt("dithering.temporal.threshold", 4)));
         this.errorQuantizationBits = Math.max(0, Math.min(7,
             config.getInt("dithering.temporal.error-quantization-bits", 2)));
+
+        this.adaptiveTuningEnabled = config.getBoolean("dithering.adaptive.enabled", true);
+        this.adaptiveHighMotionThreshold = clampDouble(config.getDouble("dithering.adaptive.high-motion-threshold", 0.12), 0.0, 1.0);
+        this.adaptiveLowMotionThreshold = clampDouble(config.getDouble("dithering.adaptive.low-motion-threshold", 0.05), 0.0, 1.0);
+        this.adaptiveFlatAreaThreshold = clampDouble(config.getDouble("dithering.adaptive.flat-area-threshold", 0.70), 0.0, 1.0);
+        this.adaptiveTemporalBoostMotion = clampInt(config.getInt("dithering.adaptive.motion.temporal-threshold-boost", 6), 0, 64);
+        this.adaptiveTemporalBoostFlat = clampInt(config.getInt("dithering.adaptive.flat.temporal-threshold-boost", 10), 0, 64);
+        this.adaptiveQuantBoostMotion = clampInt(config.getInt("dithering.adaptive.motion.error-quantization-boost", 1), 0, 4);
+        this.adaptiveQuantBoostFlat = clampInt(config.getInt("dithering.adaptive.flat.error-quantization-boost", 2), 0, 4);
+        this.adaptiveErrorThresholdBoostMotion = clampInt(config.getInt("dithering.adaptive.motion.error-threshold-boost", 4), 0, 64);
+        this.adaptiveErrorThresholdBoostFlat = clampInt(config.getInt("dithering.adaptive.flat.error-threshold-boost", 8), 0, 64);
+        this.adaptiveDiffusionScaleMotion = (float) clampDouble(config.getDouble("dithering.adaptive.motion.diffusion-scale", 0.80), 0.0, 1.0);
+        this.adaptiveDiffusionScaleFlat = (float) clampDouble(config.getDouble("dithering.adaptive.flat.diffusion-scale", 0.65), 0.0, 1.0);
     }
 
     public void setDitheringMode(DitheringMode mode) {
@@ -139,6 +177,22 @@ public class FrameProcessor {
     public int getTemporalThreshold() {
         return temporalThreshold;
     }
+
+    public void setErrorQuantizationBits(int errorQuantizationBits) {
+        this.errorQuantizationBits = clampInt(errorQuantizationBits, 0, 7);
+    }
+
+    public int getErrorQuantizationBits() {
+        return errorQuantizationBits;
+    }
+
+    public void setAdaptiveTuningEnabled(boolean adaptiveTuningEnabled) {
+        this.adaptiveTuningEnabled = adaptiveTuningEnabled;
+    }
+
+    public boolean isAdaptiveTuningEnabled() {
+        return adaptiveTuningEnabled;
+    }
     
     public ProcessedFrame processFrame(BufferedImage sourceImage, int targetWidth, int targetHeight, PerformanceMetrics metrics) {
         long aspectStart = metrics != null ? System.nanoTime() : 0;
@@ -149,6 +203,10 @@ public class FrameProcessor {
         int sourceWidth = correctedImage.getWidth();
         int sourceHeight = correctedImage.getHeight();
         byte[] sourceFrameData = extractFrameData(correctedImage);
+        FrameContentStats contentStats = analyzeFrameContent(sourceFrameData, sourceWidth, sourceHeight);
+        AdaptiveDitherProfile adaptiveProfile = buildAdaptiveProfile(contentStats);
+        lastFrameContentStats = contentStats;
+        lastAdaptiveProfile = adaptiveProfile;
 
         boolean needsUpscale = sourceWidth != targetWidth || sourceHeight != targetHeight;
 
@@ -165,7 +223,7 @@ public class FrameProcessor {
             previousSourceHash = sourcePreviousHash;
 
             long ditherStart = metrics != null ? System.nanoTime() : 0;
-            ditherFrameAtResolution(sourceFrameData, sourceWidth, sourceHeight);
+            ditherFrameAtResolution(sourceFrameData, sourceWidth, sourceHeight, adaptiveProfile);
             if (metrics != null) {
                 metrics.recordDithering(System.nanoTime() - ditherStart);
             }
@@ -190,10 +248,12 @@ public class FrameProcessor {
             previousSourceHash = savedPreviousHash;
         } else {
             long ditherStart = metrics != null ? System.nanoTime() : 0;
-            ditherFrameAtResolution(sourceFrameData, sourceWidth, sourceHeight);
+            ditherFrameAtResolution(sourceFrameData, sourceWidth, sourceHeight, adaptiveProfile);
             if (metrics != null) {
                 metrics.recordDithering(System.nanoTime() - ditherStart);
             }
+            // Persist current dithered result for next frame's temporal dithering
+            System.arraycopy(ditheredFrameData, 0, previousDitheredFrame, 0, ditheredFrameData.length);
         }
 
         long tileExtractionStart = metrics != null ? System.nanoTime() : 0;
@@ -240,7 +300,7 @@ public class FrameProcessor {
             metrics.recordTileExtraction(System.nanoTime() - tileExtractionStart);
         }
 
-        return new ProcessedFrame(updates, fullMapData);
+        return new ProcessedFrame(updates, fullMapData, contentStats);
     }
 
     private record TileExtractionResult(MapTile tile, byte[] mapData, MapTile.DirtyRegion dirtyRegion) {
@@ -326,22 +386,175 @@ public class FrameProcessor {
 
         return result;
     }
-    private void ditherFrameAtResolution(byte[] frameData, int width, int height) {
+    private void ditherFrameAtResolution(byte[] frameData, int width, int height, AdaptiveDitherProfile adaptiveProfile) {
+        int baseTemporalThreshold = temporalThreshold;
+        int baseQuantizationBits = errorQuantizationBits;
+        int baseErrorThreshold = errorThreshold;
+        float baseDiffusionStrength = errorDiffusionStrength;
 
-        switch (ditheringMode) {
-            case FLOYD_STEINBERG:
-                ditherFrameFloydSteinberg(frameData, width, height, 1.0f);
-                break;
-            case FLOYD_STEINBERG_REDUCED:
-                ditherFrameFloydSteinberg(frameData, width, height, errorDiffusionStrength);
-                break;
-            case BAYER_8X8:
-                ditherFrameBayer(frameData, width, height);
-                break;
-            case NONE:
-                ditherFrameNone(frameData, width, height);
-                break;
+        try {
+            if (adaptiveProfile != null) {
+                temporalThreshold = clampInt(adaptiveProfile.temporalThreshold(), 0, 255);
+                errorQuantizationBits = clampInt(adaptiveProfile.errorQuantizationBits(), 0, 7);
+                errorThreshold = clampInt(adaptiveProfile.errorThreshold(), 0, 255);
+                errorDiffusionStrength = (float) clampDouble(adaptiveProfile.errorDiffusionStrength(), 0.0, 1.0);
+            }
+
+            switch (ditheringMode) {
+                case FLOYD_STEINBERG:
+                    ditherFrameFloydSteinberg(frameData, width, height, 1.0f);
+                    break;
+                case FLOYD_STEINBERG_REDUCED:
+                    ditherFrameFloydSteinberg(frameData, width, height, errorDiffusionStrength);
+                    break;
+                case ATKINSON:
+                    ditherFrameAtkinson(frameData, width, height, errorDiffusionStrength);
+                    break;
+                case STUCKI:
+                    ditherFrameStucki(frameData, width, height, errorDiffusionStrength);
+                    break;
+                case BAYER_8X8:
+                    ditherFrameBayer(frameData, width, height);
+                    break;
+                case NONE:
+                    ditherFrameNone(frameData, width, height);
+                    break;
+            }
+        } finally {
+            temporalThreshold = baseTemporalThreshold;
+            errorQuantizationBits = baseQuantizationBits;
+            errorThreshold = baseErrorThreshold;
+            errorDiffusionStrength = baseDiffusionStrength;
         }
+    }
+
+    private FrameContentStats analyzeFrameContent(byte[] sourceFrameData, int width, int height) {
+        if (sourceFrameData == null || sourceFrameData.length == 0) {
+            return new FrameContentStats(0.0, 0.0, 0.0);
+        }
+
+        if (previousRawFrameData == null || previousRawFrameData.length != sourceFrameData.length ||
+            width != previousRawWidth || height != previousRawHeight) {
+            previousRawFrameData = sourceFrameData.clone();
+            previousRawWidth = width;
+            previousRawHeight = height;
+            return new FrameContentStats(0.0, 0.0, 0.0);
+        }
+
+        int stride = 4;
+        long motionAccum = 0;
+        int flatSamples = 0;
+        int lowSaturationSamples = 0;
+        int samples = 0;
+
+        for (int y = 0; y < height; y += stride) {
+            for (int x = 0; x < width; x += stride) {
+                int pixelIndex = y * width + x;
+                int dataIndex = pixelIndex * 3;
+
+                int blue = sourceFrameData[dataIndex] & 0xFF;
+                int green = sourceFrameData[dataIndex + 1] & 0xFF;
+                int red = sourceFrameData[dataIndex + 2] & 0xFF;
+
+                int prevBlue = previousRawFrameData[dataIndex] & 0xFF;
+                int prevGreen = previousRawFrameData[dataIndex + 1] & 0xFF;
+                int prevRed = previousRawFrameData[dataIndex + 2] & 0xFF;
+
+                int luma = ((red * 77) + (green * 150) + (blue * 29)) >> 8;
+                int prevLuma = ((prevRed * 77) + (prevGreen * 150) + (prevBlue * 29)) >> 8;
+                motionAccum += Math.abs(luma - prevLuma);
+
+                int max = Math.max(red, Math.max(green, blue));
+                int min = Math.min(red, Math.min(green, blue));
+                if (max - min <= 20) {
+                    lowSaturationSamples++;
+                }
+
+                int rightLuma = luma;
+                if (x + 1 < width) {
+                    int rightIdx = (pixelIndex + 1) * 3;
+                    int rb = sourceFrameData[rightIdx] & 0xFF;
+                    int rg = sourceFrameData[rightIdx + 1] & 0xFF;
+                    int rr = sourceFrameData[rightIdx + 2] & 0xFF;
+                    rightLuma = ((rr * 77) + (rg * 150) + (rb * 29)) >> 8;
+                }
+
+                int downLuma = luma;
+                if (y + 1 < height) {
+                    int downPixel = ((y + 1) * width + x) * 3;
+                    int db = sourceFrameData[downPixel] & 0xFF;
+                    int dg = sourceFrameData[downPixel + 1] & 0xFF;
+                    int dr = sourceFrameData[downPixel + 2] & 0xFF;
+                    downLuma = ((dr * 77) + (dg * 150) + (db * 29)) >> 8;
+                }
+
+                if (Math.abs(luma - rightLuma) <= 10 && Math.abs(luma - downLuma) <= 10) {
+                    flatSamples++;
+                }
+
+                samples++;
+            }
+        }
+
+        System.arraycopy(sourceFrameData, 0, previousRawFrameData, 0, sourceFrameData.length);
+
+        if (samples == 0) {
+            return new FrameContentStats(0.0, 0.0, 0.0);
+        }
+
+        double motionScore = clampDouble((double) motionAccum / (samples * 255.0), 0.0, 1.0);
+        double flatScore = clampDouble((double) flatSamples / samples, 0.0, 1.0);
+        double lowSaturationScore = clampDouble((double) lowSaturationSamples / samples, 0.0, 1.0);
+        return new FrameContentStats(motionScore, flatScore, lowSaturationScore);
+    }
+
+    private AdaptiveDitherProfile buildAdaptiveProfile(FrameContentStats contentStats) {
+        int tunedTemporalThreshold = temporalThreshold;
+        int tunedQuantizationBits = errorQuantizationBits;
+        int tunedErrorThreshold = errorThreshold;
+        float tunedDiffusionStrength = errorDiffusionStrength;
+        String mode = "BASE";
+
+        if (adaptiveTuningEnabled && contentStats != null) {
+            if (contentStats.motionScore() >= adaptiveHighMotionThreshold) {
+                tunedTemporalThreshold += adaptiveTemporalBoostMotion;
+                tunedQuantizationBits += adaptiveQuantBoostMotion;
+                tunedErrorThreshold += adaptiveErrorThresholdBoostMotion;
+                tunedDiffusionStrength *= adaptiveDiffusionScaleMotion;
+                mode = "MOTION";
+            } else if (contentStats.motionScore() <= adaptiveLowMotionThreshold &&
+                (contentStats.flatScore() >= adaptiveFlatAreaThreshold || contentStats.lowSaturationScore() >= adaptiveFlatAreaThreshold)) {
+                tunedTemporalThreshold += adaptiveTemporalBoostFlat;
+                tunedQuantizationBits += adaptiveQuantBoostFlat;
+                tunedErrorThreshold += adaptiveErrorThresholdBoostFlat;
+                tunedDiffusionStrength *= adaptiveDiffusionScaleFlat;
+                mode = "FLAT";
+            }
+        }
+
+        return new AdaptiveDitherProfile(
+            clampInt(tunedTemporalThreshold, 0, 255),
+            clampInt(tunedQuantizationBits, 0, 7),
+            clampInt(tunedErrorThreshold, 0, 255),
+            (float) clampDouble(tunedDiffusionStrength, 0.0, 1.0),
+            mode
+        );
+    }
+
+    private static int clampInt(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private static double clampDouble(double value, double min, double max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    public FrameContentStats getLastFrameContentStats() {
+        return lastFrameContentStats;
+    }
+
+    public AdaptiveDitherProfile getLastAdaptiveProfile() {
+        return lastAdaptiveProfile;
     }
 
     private byte[] upscalePaletteIndices(byte[] sourceIndices, int sourceWidth, int sourceHeight, int targetWidth, int targetHeight) {
@@ -532,7 +745,8 @@ public class FrameProcessor {
     }
 
     private void ensureBandBuffers(int numBands, int width) {
-        int needed = numBands * 2;
+        // 3 rows per band: current + next + next-next (needed for Atkinson/Stucki 2-row lookahead)
+        int needed = numBands * 3;
         if (bandDitherBuffers == null || bandDitherBuffers.length < needed || bandBufferWidth != width) {
             bandDitherBuffers = new int[needed][];
             for (int i = 0; i < needed; i++) {
@@ -585,8 +799,8 @@ public class FrameProcessor {
             for (int band = 0; band < numBands; band++) {
                 int startY = band * bandHeight;
                 int endY = (band == numBands - 1) ? height : startY + bandHeight;
-                int[] buf0 = bandDitherBuffers[band * 2];
-                int[] buf1 = bandDitherBuffers[band * 2 + 1];
+                int[] buf0 = bandDitherBuffers[band * 3];
+                int[] buf1 = bandDitherBuffers[band * 3 + 1];
 
                 futures[band] = executor.submit(() -> {
                     java.util.Arrays.fill(buf0, 0);
@@ -605,6 +819,368 @@ public class FrameProcessor {
                     e.printStackTrace();
                 }
             }
+        }
+    }
+
+    private void ditherFrameAtkinson(byte[] frameData, int width, int height, float errorStrength) {
+        // Slightly dampen Atkinson diffusion to better match video stability on map palettes.
+        int errorStrengthFixed = (int) (Math.max(0.0f, Math.min(1.0f, errorStrength * 0.75f)) * 256.0f);
+        int maxBands = Math.max(1, Runtime.getRuntime().availableProcessors() / 2);
+        int numBands = Math.max(1, Math.min(maxBands, height / 32));
+
+        ensureBandBuffers(numBands, width);
+
+        boolean doTemporal = useTemporalDithering;
+        int hashBucket = doTemporal ? Math.max(1, temporalThreshold * 2) : 1;
+        int localTemporalThreshold = Math.min(255, temporalThreshold + 2);
+        int errorMask = errorQuantizationBits > 0 ? -(1 << errorQuantizationBits) : 0;
+        int localErrorThreshold = errorThreshold;
+        byte[] prevFrame = previousDitheredFrame;
+        int[] prevHash = previousSourceHash;
+        int prevFrameLength = prevFrame.length;
+        int prevHashLength = prevHash.length;
+        byte[] output = ditheredFrameData;
+
+        if (numBands <= 1) {
+            int[] currentRow = bandDitherBuffers[0];
+            int[] nextRow = bandDitherBuffers[1];
+            int[] nextNextRow = bandDitherBuffers[2];
+            java.util.Arrays.fill(currentRow, 0);
+            java.util.Arrays.fill(nextRow, 0);
+            java.util.Arrays.fill(nextNextRow, 0);
+            ditherBandAtkinson(frameData, width, 0, height, errorStrengthFixed,
+                currentRow, nextRow, nextNextRow,
+                doTemporal, hashBucket, localTemporalThreshold,
+                errorMask, localErrorThreshold,
+                prevFrame, prevHash, prevFrameLength, prevHashLength, output);
+            return;
+        }
+
+        int bandHeight = height / numBands;
+        Future<?>[] futures = new Future<?>[numBands];
+        for (int band = 0; band < numBands; band++) {
+            int startY = band * bandHeight;
+            int endY = (band == numBands - 1) ? height : startY + bandHeight;
+            int[] currentRow = bandDitherBuffers[band * 3];
+            int[] nextRow = bandDitherBuffers[band * 3 + 1];
+            int[] nextNextRow = bandDitherBuffers[band * 3 + 2];
+
+            futures[band] = executor.submit(() -> {
+                java.util.Arrays.fill(currentRow, 0);
+                java.util.Arrays.fill(nextRow, 0);
+                java.util.Arrays.fill(nextNextRow, 0);
+                ditherBandAtkinson(frameData, width, startY, endY, errorStrengthFixed,
+                    currentRow, nextRow, nextNextRow,
+                    doTemporal, hashBucket, localTemporalThreshold,
+                    errorMask, localErrorThreshold,
+                    prevFrame, prevHash, prevFrameLength, prevHashLength, output);
+            });
+        }
+
+        for (Future<?> f : futures) {
+            try {
+                f.get();
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    private void ditherFrameStucki(byte[] frameData, int width, int height, float errorStrength) {
+        // Stucki keeps more detail; a smaller damping still helps reduce visible sparkle.
+        int errorStrengthFixed = (int) (Math.max(0.0f, Math.min(1.0f, errorStrength * 0.85f)) * 256.0f);
+        int maxBands = Math.max(1, Runtime.getRuntime().availableProcessors() / 2);
+        int numBands = Math.max(1, Math.min(maxBands, height / 32));
+
+        ensureBandBuffers(numBands, width);
+
+        boolean doTemporal = useTemporalDithering;
+        int hashBucket = doTemporal ? Math.max(1, temporalThreshold * 2) : 1;
+        int localTemporalThreshold = Math.min(255, temporalThreshold + 1);
+        int errorMask = errorQuantizationBits > 0 ? -(1 << errorQuantizationBits) : 0;
+        int localErrorThreshold = errorThreshold;
+        byte[] prevFrame = previousDitheredFrame;
+        int[] prevHash = previousSourceHash;
+        int prevFrameLength = prevFrame.length;
+        int prevHashLength = prevHash.length;
+        byte[] output = ditheredFrameData;
+
+        if (numBands <= 1) {
+            int[] currentRow = bandDitherBuffers[0];
+            int[] nextRow = bandDitherBuffers[1];
+            int[] nextNextRow = bandDitherBuffers[2];
+            java.util.Arrays.fill(currentRow, 0);
+            java.util.Arrays.fill(nextRow, 0);
+            java.util.Arrays.fill(nextNextRow, 0);
+            ditherBandStucki(frameData, width, 0, height, errorStrengthFixed,
+                currentRow, nextRow, nextNextRow,
+                doTemporal, hashBucket, localTemporalThreshold,
+                errorMask, localErrorThreshold,
+                prevFrame, prevHash, prevFrameLength, prevHashLength, output);
+            return;
+        }
+
+        int bandHeight = height / numBands;
+        Future<?>[] futures = new Future<?>[numBands];
+        for (int band = 0; band < numBands; band++) {
+            int startY = band * bandHeight;
+            int endY = (band == numBands - 1) ? height : startY + bandHeight;
+            int[] currentRow = bandDitherBuffers[band * 3];
+            int[] nextRow = bandDitherBuffers[band * 3 + 1];
+            int[] nextNextRow = bandDitherBuffers[band * 3 + 2];
+
+            futures[band] = executor.submit(() -> {
+                java.util.Arrays.fill(currentRow, 0);
+                java.util.Arrays.fill(nextRow, 0);
+                java.util.Arrays.fill(nextNextRow, 0);
+                ditherBandStucki(frameData, width, startY, endY, errorStrengthFixed,
+                    currentRow, nextRow, nextNextRow,
+                    doTemporal, hashBucket, localTemporalThreshold,
+                    errorMask, localErrorThreshold,
+                    prevFrame, prevHash, prevFrameLength, prevHashLength, output);
+            });
+        }
+
+        for (Future<?> f : futures) {
+            try {
+                f.get();
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    private static void ditherBandAtkinson(byte[] frameData, int width,
+                                           int startY, int endY, int errorStrengthFixed,
+                                           int[] currentRow, int[] nextRow, int[] nextNextRow,
+                                           boolean doTemporal, int hashBucket, int temporalThreshold,
+                                           int errorMask, int errorThreshold,
+                                           byte[] prevFrame, int[] prevHash,
+                                           int prevFrameLength, int prevHashLength,
+                                           byte[] output) {
+        int widthMinus1 = width - 1;
+        int widthMinus2 = width - 2;
+
+        for (int y = startY; y < endY; y++) {
+            boolean hasNextY = (y + 1) < endY;
+            boolean hasNextNextY = (y + 2) < endY;
+            int yIndex = y * width;
+            int bufferIndex = 0;
+            int pos = yIndex * 3;
+            int pixelIdx = yIndex;
+
+            for (int x = 0; x < width; x++, bufferIndex += 3, pos += 3, pixelIdx++) {
+                int rawBlue = frameData[pos] & 0xff;
+                int rawGreen = frameData[pos + 1] & 0xff;
+                int rawRed = frameData[pos + 2] & 0xff;
+                int blue = clamp((frameData[pos] & 0xff) + currentRow[bufferIndex + 2]);
+                int green = clamp((frameData[pos + 1] & 0xff) + currentRow[bufferIndex + 1]);
+                int red = clamp((frameData[pos + 2] & 0xff) + currentRow[bufferIndex]);
+
+                if (tryTemporalReuse(doTemporal, pixelIdx, rawRed, rawGreen, rawBlue,
+                    hashBucket, temporalThreshold,
+                    prevFrame, prevHash, prevFrameLength, prevHashLength, output)) {
+                    continue;
+                }
+
+                int lookupIdx = (red >> 1) << 14 | (green >> 1) << 7 | (blue >> 1);
+                int closest = FULL_COLOR_MAP[lookupIdx];
+                int deltaR = red - ((closest >> 16) & 0xFF);
+                int deltaG = green - ((closest >> 8) & 0xFF);
+                int deltaB = blue - (closest & 0xFF);
+                int totalError = Math.abs(deltaR) + Math.abs(deltaG) + Math.abs(deltaB);
+                if (totalError > errorThreshold) {
+                    if (errorMask != 0) {
+                        deltaR = deltaR >= 0 ? (deltaR & errorMask) : -((-deltaR) & errorMask);
+                        deltaG = deltaG >= 0 ? (deltaG & errorMask) : -((-deltaG) & errorMask);
+                        deltaB = deltaB >= 0 ? (deltaB & errorMask) : -((-deltaB) & errorMask);
+                    }
+                    deltaR = (deltaR * errorStrengthFixed) >> 8;
+                    deltaG = (deltaG * errorStrengthFixed) >> 8;
+                    deltaB = (deltaB * errorStrengthFixed) >> 8;
+
+                    int shareR = deltaR >> 3;
+                    int shareG = deltaG >> 3;
+                    int shareB = deltaB >> 3;
+
+                    if (x < widthMinus1) {
+                        int idx = bufferIndex + 3;
+                        currentRow[idx] += shareR;
+                        currentRow[idx + 1] += shareG;
+                        currentRow[idx + 2] += shareB;
+                    }
+                    if (x < widthMinus2) {
+                        int idx = bufferIndex + 6;
+                        currentRow[idx] += shareR;
+                        currentRow[idx + 1] += shareG;
+                        currentRow[idx + 2] += shareB;
+                    }
+                    if (hasNextY) {
+                        if (x > 0) {
+                            int idx = bufferIndex - 3;
+                            nextRow[idx] += shareR;
+                            nextRow[idx + 1] += shareG;
+                            nextRow[idx + 2] += shareB;
+                        }
+                        nextRow[bufferIndex] += shareR;
+                        nextRow[bufferIndex + 1] += shareG;
+                        nextRow[bufferIndex + 2] += shareB;
+                        if (x < widthMinus1) {
+                            int idx = bufferIndex + 3;
+                            nextRow[idx] += shareR;
+                            nextRow[idx + 1] += shareG;
+                            nextRow[idx + 2] += shareB;
+                        }
+                    }
+                    if (hasNextNextY) {
+                        nextNextRow[bufferIndex] += shareR;
+                        nextNextRow[bufferIndex + 1] += shareG;
+                        nextNextRow[bufferIndex + 2] += shareB;
+                    }
+                }
+
+                output[pixelIdx] = COLOR_MAP[lookupIdx];
+            }
+
+            int[] temp = currentRow;
+            currentRow = nextRow;
+            nextRow = nextNextRow;
+            nextNextRow = temp;
+            java.util.Arrays.fill(nextNextRow, 0);
+        }
+    }
+
+    private static void ditherBandStucki(byte[] frameData, int width,
+                                         int startY, int endY, int errorStrengthFixed,
+                                         int[] currentRow, int[] nextRow, int[] nextNextRow,
+                                         boolean doTemporal, int hashBucket, int temporalThreshold,
+                                         int errorMask, int errorThreshold,
+                                         byte[] prevFrame, int[] prevHash,
+                                         int prevFrameLength, int prevHashLength,
+                                         byte[] output) {
+        int widthMinus1 = width - 1;
+        int widthMinus2 = width - 2;
+
+        for (int y = startY; y < endY; y++) {
+            boolean hasNextY = (y + 1) < endY;
+            boolean hasNextNextY = (y + 2) < endY;
+            int yIndex = y * width;
+            int bufferIndex = 0;
+            int pos = yIndex * 3;
+            int pixelIdx = yIndex;
+
+            for (int x = 0; x < width; x++, bufferIndex += 3, pos += 3, pixelIdx++) {
+                int rawBlue = frameData[pos] & 0xff;
+                int rawGreen = frameData[pos + 1] & 0xff;
+                int rawRed = frameData[pos + 2] & 0xff;
+                int blue = clamp((frameData[pos] & 0xff) + currentRow[bufferIndex + 2]);
+                int green = clamp((frameData[pos + 1] & 0xff) + currentRow[bufferIndex + 1]);
+                int red = clamp((frameData[pos + 2] & 0xff) + currentRow[bufferIndex]);
+
+                if (tryTemporalReuse(doTemporal, pixelIdx, rawRed, rawGreen, rawBlue,
+                    hashBucket, temporalThreshold,
+                    prevFrame, prevHash, prevFrameLength, prevHashLength, output)) {
+                    continue;
+                }
+
+                int lookupIdx = (red >> 1) << 14 | (green >> 1) << 7 | (blue >> 1);
+                int closest = FULL_COLOR_MAP[lookupIdx];
+                int deltaR = red - ((closest >> 16) & 0xFF);
+                int deltaG = green - ((closest >> 8) & 0xFF);
+                int deltaB = blue - (closest & 0xFF);
+                int totalError = Math.abs(deltaR) + Math.abs(deltaG) + Math.abs(deltaB);
+                if (totalError > errorThreshold) {
+                    if (errorMask != 0) {
+                        deltaR = deltaR >= 0 ? (deltaR & errorMask) : -((-deltaR) & errorMask);
+                        deltaG = deltaG >= 0 ? (deltaG & errorMask) : -((-deltaG) & errorMask);
+                        deltaB = deltaB >= 0 ? (deltaB & errorMask) : -((-deltaB) & errorMask);
+                    }
+                    deltaR = (deltaR * errorStrengthFixed) >> 8;
+                    deltaG = (deltaG * errorStrengthFixed) >> 8;
+                    deltaB = (deltaB * errorStrengthFixed) >> 8;
+
+                    if (x < widthMinus1) {
+                        int idx = bufferIndex + 3;
+                        currentRow[idx] += (deltaR * 8) / 42;
+                        currentRow[idx + 1] += (deltaG * 8) / 42;
+                        currentRow[idx + 2] += (deltaB * 8) / 42;
+                    }
+                    if (x < widthMinus2) {
+                        int idx = bufferIndex + 6;
+                        currentRow[idx] += (deltaR * 4) / 42;
+                        currentRow[idx + 1] += (deltaG * 4) / 42;
+                        currentRow[idx + 2] += (deltaB * 4) / 42;
+                    }
+
+                    if (hasNextY) {
+                        if (x > 1) {
+                            int idx = bufferIndex - 6;
+                            nextRow[idx] += (deltaR * 2) / 42;
+                            nextRow[idx + 1] += (deltaG * 2) / 42;
+                            nextRow[idx + 2] += (deltaB * 2) / 42;
+                        }
+                        if (x > 0) {
+                            int idx = bufferIndex - 3;
+                            nextRow[idx] += (deltaR * 4) / 42;
+                            nextRow[idx + 1] += (deltaG * 4) / 42;
+                            nextRow[idx + 2] += (deltaB * 4) / 42;
+                        }
+                        nextRow[bufferIndex] += (deltaR * 8) / 42;
+                        nextRow[bufferIndex + 1] += (deltaG * 8) / 42;
+                        nextRow[bufferIndex + 2] += (deltaB * 8) / 42;
+                        if (x < widthMinus1) {
+                            int idx = bufferIndex + 3;
+                            nextRow[idx] += (deltaR * 4) / 42;
+                            nextRow[idx + 1] += (deltaG * 4) / 42;
+                            nextRow[idx + 2] += (deltaB * 4) / 42;
+                        }
+                        if (x < widthMinus2) {
+                            int idx = bufferIndex + 6;
+                            nextRow[idx] += (deltaR * 2) / 42;
+                            nextRow[idx + 1] += (deltaG * 2) / 42;
+                            nextRow[idx + 2] += (deltaB * 2) / 42;
+                        }
+                    }
+
+                    if (hasNextNextY) {
+                        if (x > 1) {
+                            int idx = bufferIndex - 6;
+                            nextNextRow[idx] += deltaR / 42;
+                            nextNextRow[idx + 1] += deltaG / 42;
+                            nextNextRow[idx + 2] += deltaB / 42;
+                        }
+                        if (x > 0) {
+                            int idx = bufferIndex - 3;
+                            nextNextRow[idx] += (deltaR * 2) / 42;
+                            nextNextRow[idx + 1] += (deltaG * 2) / 42;
+                            nextNextRow[idx + 2] += (deltaB * 2) / 42;
+                        }
+                        nextNextRow[bufferIndex] += (deltaR * 4) / 42;
+                        nextNextRow[bufferIndex + 1] += (deltaG * 4) / 42;
+                        nextNextRow[bufferIndex + 2] += (deltaB * 4) / 42;
+                        if (x < widthMinus1) {
+                            int idx = bufferIndex + 3;
+                            nextNextRow[idx] += (deltaR * 2) / 42;
+                            nextNextRow[idx + 1] += (deltaG * 2) / 42;
+                            nextNextRow[idx + 2] += (deltaB * 2) / 42;
+                        }
+                        if (x < widthMinus2) {
+                            int idx = bufferIndex + 6;
+                            nextNextRow[idx] += deltaR / 42;
+                            nextNextRow[idx + 1] += deltaG / 42;
+                            nextNextRow[idx + 2] += deltaB / 42;
+                        }
+                    }
+                }
+
+                output[pixelIdx] = COLOR_MAP[lookupIdx];
+            }
+
+            int[] temp = currentRow;
+            currentRow = nextRow;
+            nextRow = nextNextRow;
+            nextNextRow = temp;
+            java.util.Arrays.fill(nextNextRow, 0);
         }
     }
 
@@ -655,32 +1231,17 @@ public class FrameProcessor {
         int pixelIdx = yIndex;
 
         for (int x = 0; x < width; x++, bufferIndex += 3, pos += 3, pixelIdx++) {
+            int rawBlue = frameData[pos] & 0xff;
+            int rawGreen = frameData[pos + 1] & 0xff;
+            int rawRed = frameData[pos + 2] & 0xff;
             int blue = clamp((frameData[pos] & 0xff) + currentRow[bufferIndex + 2]);
             int green = clamp((frameData[pos + 1] & 0xff) + currentRow[bufferIndex + 1]);
             int red = clamp((frameData[pos + 2] & 0xff) + currentRow[bufferIndex]);
 
-            if (doTemporal && pixelIdx < prevFrameLength && pixelIdx < prevHashLength) {
-                int currentHash = (((red / hashBucket) << 16) |
-                                  ((green / hashBucket) << 8) |
-                                  (blue / hashBucket)) + 1;
-
-                if (currentHash == prevHash[pixelIdx]) {
-                    output[pixelIdx] = prevFrame[pixelIdx];
-                    continue;
-                }
-                int prevHashValue = prevHash[pixelIdx];
-                if (prevHashValue > 0) {
-                    int prevR = ((prevHashValue - 1) >> 16) * hashBucket;
-                    int prevG = (((prevHashValue - 1) >> 8) & 0xFF) * hashBucket;
-                    int prevB = ((prevHashValue - 1) & 0xFF) * hashBucket;
-                    if (Math.abs(red - prevR) <= temporalThreshold &&
-                        Math.abs(green - prevG) <= temporalThreshold &&
-                        Math.abs(blue - prevB) <= temporalThreshold) {
-                        output[pixelIdx] = prevFrame[pixelIdx];
-                        continue;
-                    }
-                }
-                prevHash[pixelIdx] = currentHash;
+            if (tryTemporalReuse(doTemporal, pixelIdx, rawRed, rawGreen, rawBlue,
+                hashBucket, temporalThreshold,
+                prevFrame, prevHash, prevFrameLength, prevHashLength, output)) {
+                continue;
             }
 
             int lookupIdx = (red >> 1) << 14 | (green >> 1) << 7 | (blue >> 1);
@@ -694,9 +1255,9 @@ public class FrameProcessor {
             int totalError = Math.abs(deltaR) + Math.abs(deltaG) + Math.abs(deltaB);
             if (totalError > errorThreshold) {
                 if (errorMask != 0) {
-                    deltaR &= errorMask;
-                    deltaG &= errorMask;
-                    deltaB &= errorMask;
+                    deltaR = deltaR >= 0 ? (deltaR & errorMask) : -((-deltaR) & errorMask);
+                    deltaG = deltaG >= 0 ? (deltaG & errorMask) : -((-deltaG) & errorMask);
+                    deltaB = deltaB >= 0 ? (deltaB & errorMask) : -((-deltaB) & errorMask);
                 }
                 deltaR = (deltaR * errorStrengthFixed) >> 8;
                 deltaG = (deltaG * errorStrengthFixed) >> 8;
@@ -739,32 +1300,17 @@ public class FrameProcessor {
         int pixelIdx = yIndex + widthMinus;
 
         for (int x = widthMinus; x >= 0; x--, bufferIndex -= 3, pos -= 3, pixelIdx--) {
+            int rawBlue = frameData[pos] & 0xff;
+            int rawGreen = frameData[pos + 1] & 0xff;
+            int rawRed = frameData[pos + 2] & 0xff;
             int blue = clamp((frameData[pos] & 0xff) + currentRow[bufferIndex + 2]);
             int green = clamp((frameData[pos + 1] & 0xff) + currentRow[bufferIndex + 1]);
             int red = clamp((frameData[pos + 2] & 0xff) + currentRow[bufferIndex]);
 
-            if (doTemporal && pixelIdx < prevFrameLength && pixelIdx < prevHashLength) {
-                int currentHash = (((red / hashBucket) << 16) |
-                                  ((green / hashBucket) << 8) |
-                                  (blue / hashBucket)) + 1;
-
-                if (currentHash == prevHash[pixelIdx]) {
-                    output[pixelIdx] = prevFrame[pixelIdx];
-                    continue;
-                }
-                int prevHashValue = prevHash[pixelIdx];
-                if (prevHashValue > 0) {
-                    int prevR = ((prevHashValue - 1) >> 16) * hashBucket;
-                    int prevG = (((prevHashValue - 1) >> 8) & 0xFF) * hashBucket;
-                    int prevB = ((prevHashValue - 1) & 0xFF) * hashBucket;
-                    if (Math.abs(red - prevR) <= temporalThreshold &&
-                        Math.abs(green - prevG) <= temporalThreshold &&
-                        Math.abs(blue - prevB) <= temporalThreshold) {
-                        output[pixelIdx] = prevFrame[pixelIdx];
-                        continue;
-                    }
-                }
-                prevHash[pixelIdx] = currentHash;
+            if (tryTemporalReuse(doTemporal, pixelIdx, rawRed, rawGreen, rawBlue,
+                hashBucket, temporalThreshold,
+                prevFrame, prevHash, prevFrameLength, prevHashLength, output)) {
+                continue;
             }
 
             int lookupIdx = (red >> 1) << 14 | (green >> 1) << 7 | (blue >> 1);
@@ -778,9 +1324,9 @@ public class FrameProcessor {
             int totalError = Math.abs(deltaR) + Math.abs(deltaG) + Math.abs(deltaB);
             if (totalError > errorThreshold) {
                 if (errorMask != 0) {
-                    deltaR &= errorMask;
-                    deltaG &= errorMask;
-                    deltaB &= errorMask;
+                    deltaR = deltaR >= 0 ? (deltaR & errorMask) : -((-deltaR) & errorMask);
+                    deltaG = deltaG >= 0 ? (deltaG & errorMask) : -((-deltaG) & errorMask);
+                    deltaB = deltaB >= 0 ? (deltaB & errorMask) : -((-deltaB) & errorMask);
                 }
                 deltaR = (deltaR * errorStrengthFixed) >> 8;
                 deltaG = (deltaG * errorStrengthFixed) >> 8;
@@ -820,6 +1366,44 @@ public class FrameProcessor {
                          (rgb & 0xFF) >> 1];
     }
 
+    private static boolean tryTemporalReuse(boolean doTemporal, int pixelIdx,
+                                            int red, int green, int blue,
+                                            int hashBucket, int temporalThreshold,
+                                            byte[] prevFrame, int[] prevHash,
+                                            int prevFrameLength, int prevHashLength,
+                                            byte[] output) {
+        if (!doTemporal || pixelIdx >= prevFrameLength || pixelIdx >= prevHashLength) {
+            return false;
+        }
+
+        int currentHash = (((red / hashBucket) << 16) |
+            ((green / hashBucket) << 8) |
+            (blue / hashBucket)) + 1;
+        int prevHashValue = prevHash[pixelIdx];
+
+        if (currentHash == prevHashValue) {
+            output[pixelIdx] = prevFrame[pixelIdx];
+            return true;
+        }
+
+        if (prevHashValue > 0) {
+            int prevR = ((prevHashValue - 1) >> 16) * hashBucket;
+            int prevG = (((prevHashValue - 1) >> 8) & 0xFF) * hashBucket;
+            int prevB = ((prevHashValue - 1) & 0xFF) * hashBucket;
+            if (Math.abs(red - prevR) <= temporalThreshold &&
+                Math.abs(green - prevG) <= temporalThreshold &&
+                Math.abs(blue - prevB) <= temporalThreshold) {
+                // Track drift while still reusing the previous palette index to reduce shimmer.
+                prevHash[pixelIdx] = currentHash;
+                output[pixelIdx] = prevFrame[pixelIdx];
+                return true;
+            }
+        }
+
+        prevHash[pixelIdx] = currentHash;
+        return false;
+    }
+
     
     private static int getBestFullColor(int red, int green, int blue) {
         int lookupIdx = (red >> 1) << 14 | (green >> 1) << 7 | (blue >> 1);
@@ -833,7 +1417,8 @@ public class FrameProcessor {
 
     public record ProcessedFrame(
         List<PacketDispatcher.TileUpdate> updates,
-        byte[][] fullMapData
+        byte[][] fullMapData,
+        FrameContentStats contentStats
     ) {
         public int getChangedTileCount() {
             return updates.size();
@@ -845,6 +1430,18 @@ public class FrameProcessor {
                 .mapToLong(u -> u.dirtyRegion().getDataSize())
                 .sum();
         }
+    }
+
+    public record FrameContentStats(double motionScore, double flatScore, double lowSaturationScore) {
+    }
+
+    public record AdaptiveDitherProfile(
+        int temporalThreshold,
+        int errorQuantizationBits,
+        int errorThreshold,
+        float errorDiffusionStrength,
+        String mode
+    ) {
     }
 }
 
