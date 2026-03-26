@@ -431,7 +431,7 @@ public class VideoPlayer {
 
             // Stage 3: Dispatch packets
             long dispatchStart = System.nanoTime();
-            packetDispatcher.dispatchFrame(screen, processedFrame.updates(), performanceMetrics);
+            packetDispatcher.dispatchFrame(screen, processedFrame.updates(), processedFrame.contentStats(), performanceMetrics);
             long dispatchEnd = System.nanoTime();
             performanceMetrics.recordPacketDispatch(dispatchEnd - dispatchStart);
             framesProcessed.incrementAndGet();
@@ -610,18 +610,25 @@ public class VideoPlayer {
         long upscale = performanceMetrics.getLastUpscalingUs();
         long tiles = performanceMetrics.getLastTileExtractionUs();
         long total = performanceMetrics.getLastTotalFrameUs();
-        float stability = performanceMetrics.getLastOutputStabilityPercent();
-        int dirtyTiles = performanceMetrics.getLastDirtyTileCount();
-        int skippedTiles = performanceMetrics.getLastSkippedTileCount();
-        int totalTiles = dirtyTiles + skippedTiles;
+        long frameBytes = packetDispatcher.getLastFrameBytesSent();
+        int sentTiles = packetDispatcher.getLastFrameTileCount();
+        int multiRegionTiles = packetDispatcher.getLastFrameMultiRegionTileCount();
+        long boundingBytes = packetDispatcher.getLastFrameBoundingBytes();
+        long fullMapBytes = packetDispatcher.getLastFrameFullMapBytes();
+        long frameCapBytes = packetDispatcher.getLastFrameByteCap();
+        FrameProcessor.FrameContentStats contentStats = frameProcessor.getLastFrameContentStats();
+        FrameProcessor.AdaptiveDitherProfile adaptiveProfile = frameProcessor.getLastAdaptiveProfile();
+        double boxSavePercent = boundingBytes > 0 ? (1.0 - ((double) frameBytes / boundingBytes)) * 100.0 : 0.0;
+        double fullSavePercent = fullMapBytes > 0 ? (1.0 - ((double) frameBytes / fullMapBytes)) * 100.0 : 0.0;
+        long avgBytesPerTile = sentTiles > 0 ? frameBytes / sentTiles : 0;
 
         String message = String.format(
             "<gray>FPS: <white>%.1f</white> <dark_gray>|</dark_gray> " +
             "T: <white>%.1fms</white> <dark_gray>[</dark_gray>" +
             "<yellow>D:%.1f</yellow> <gold>Di:%.1f</gold> <gold>U:%.1f</gold> <aqua>Ti:%.1f</aqua>" +
             "<dark_gray>]</dark_gray> " +
-            "<dark_gray>|</dark_gray> BW: <white>%s/s</white> " +
-            "<dark_gray>|</dark_gray> <light_purple>Stab:<white>%.0f%%</white> Dirty:<white>%d</white>/<green>%d</green></light_purple>" +
+            "<dark_gray>|</dark_gray> BW: <white>%s/s</white> <gray>(%s/f cap:%s)</gray> " +
+            "<dark_gray>|</dark_gray> <light_purple>Tiles:<white>%d</white> MR:<white>%d</white> Avg:<white>%s</white> Save:<white>%.0f%%</white>/<green>%.0f%%</green> M:<white>%.2f</white> A:<white>%s</white></light_purple>" +
             " <dark_gray>|</dark_gray> %s",
             debugCurrentFps,
             total / 1000.0,
@@ -630,9 +637,15 @@ public class VideoPlayer {
             upscale / 1000.0,
             tiles / 1000.0,
             formatBytes(bytesPerSecond),
-            stability,
-            dirtyTiles,
-            totalTiles,
+            formatBytes(frameBytes),
+            formatBytes(frameCapBytes),
+            sentTiles,
+            multiRegionTiles,
+            formatBytes(avgBytesPerTile),
+            boxSavePercent,
+            fullSavePercent,
+            contentStats.motionScore(),
+            adaptiveProfile.mode(),
             formatDriftTag(lastDriftNanos)
         );
         Component component = MiniMessage.miniMessage().deserialize(message);
