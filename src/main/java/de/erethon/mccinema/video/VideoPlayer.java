@@ -56,10 +56,15 @@ public class VideoPlayer {
     private long playbackStartTime;
     private long pausedAtFrame;
 
-    // A/V sync: if video falls this far behind audio (in ns), skip frames to catch up.
-    // 150ms ≈ 3 frames at 20fps — small enough to prevent perceptible desync,
-    // large enough to tolerate normal processing jitter.
-    private static final long AV_SYNC_THRESHOLD_NS = 150_000_000L;
+    private static final long DEFAULT_AV_SYNC_THRESHOLD_NS = 150_000_000L;
+    private static final int DEFAULT_MAX_DROP_FRAMES_PER_CYCLE = 8;
+    private static final int DEFAULT_HARD_SEEK_THRESHOLD_FRAMES = 120;
+
+    private final long avSyncThresholdNanos;
+    private final int maxDropFramesPerCycle;
+    private final int hardSeekThresholdFrames;
+    private final boolean avSyncDebugLogging;
+    private volatile long lastAvSyncLogNanos;
 
     // Epoch counter incremented on seek/resume to invalidate in-flight tasks
     // that were scheduled before the seek. Prevents stale rescheduling races.
@@ -90,6 +95,16 @@ public class VideoPlayer {
         this.packetDispatcher = new PacketDispatcher(plugin);
         this.performanceMetrics = new PerformanceMetrics();
         this.converter = new Java2DFrameConverter();
+
+        long configuredThresholdMs = Math.max(10L,
+            plugin.getConfig().getLong("performance.av-sync.threshold-ms", DEFAULT_AV_SYNC_THRESHOLD_NS / 1_000_000L));
+        this.avSyncThresholdNanos = configuredThresholdMs * 1_000_000L;
+        this.maxDropFramesPerCycle = Math.max(1,
+            plugin.getConfig().getInt("performance.av-sync.max-drop-frames-per-cycle", DEFAULT_MAX_DROP_FRAMES_PER_CYCLE));
+        this.hardSeekThresholdFrames = Math.max(1,
+            plugin.getConfig().getInt("performance.av-sync.hard-seek-threshold-frames", DEFAULT_HARD_SEEK_THRESHOLD_FRAMES));
+        this.avSyncDebugLogging = plugin.getConfig().getBoolean("performance.av-sync.debug-logging", false);
+        this.lastAvSyncLogNanos = 0L;
     }
 
     public void setAudioManager(AudioManager audioManager) {
@@ -381,7 +396,7 @@ public class VideoPlayer {
             long driftNanos = elapsedNanos - videoPositionNanos;
             lastDriftNanos = driftNanos;
 
-            if (driftNanos > AV_SYNC_THRESHOLD_NS) {
+            if (driftNanos > avSyncThresholdNanos) {
                 // Calculate which frame we SHOULD be displaying right now
                 long targetFrame = (long)(elapsedNanos / 1_000_000_000.0 * frameRate);
                 long total = totalFrames.get();
@@ -391,18 +406,33 @@ public class VideoPlayer {
                 long currentFrameNum = currentFrame.get();
                 long framesToSkip = targetFrame - currentFrameNum;
                 if (framesToSkip > 0) {
-                    grabber.setFrameNumber((int) targetFrame);
-                    currentFrame.set(targetFrame);
-                    framesSkipped.addAndGet(framesToSkip);
-                    plugin.getLogger().fine("A/V sync: skipped " + framesToSkip + " frames " +
-                        "(drift: " + (driftNanos / 1_000_000) + "ms, jumped to frame " + targetFrame + ")");
+                    if (framesToSkip >= hardSeekThresholdFrames) {
+                        grabber.setFrameNumber((int) targetFrame);
+                        currentFrame.set(targetFrame);
+                        framesSkipped.addAndGet(framesToSkip);
+                        logAvSync("A/V sync hard-seek: skipped " + framesToSkip + " frames " +
+                            "(drift: " + (driftNanos / 1_000_000) + "ms, jumped to frame " + targetFrame + ")");
+                    } else {
+                        int framesToDrop = (int) Math.min(framesToSkip, maxDropFramesPerCycle);
+                        int dropped = dropFramesSequential(framesToDrop);
+                        if (dropped > 0) {
+                            currentFrame.addAndGet(dropped);
+                            framesSkipped.addAndGet(dropped);
+                            logAvSync("A/V sync drop: dropped " + dropped + " frame(s) " +
+                                "(drift: " + (driftNanos / 1_000_000) + "ms, target frame " + targetFrame + ")");
+                        }
+                        if (state.get() != State.PLAYING) {
+                            return currentFrame.get();
+                        }
+                    }
                 }
-            } else if (driftNanos < -AV_SYNC_THRESHOLD_NS) {
+            } else if (driftNanos < -avSyncThresholdNanos) {
                 // Video is ahead of the audio clock (e.g. after a seek race condition).
                 // Re-anchor the playback start time so drift resets to zero.
                 // The scheduling will naturally insert the correct delay for the next frame.
                 playbackStartTime = frameStartTime - videoPositionNanos;
                 lastDriftNanos = 0;
+                logAvSync("A/V sync re-anchored playback clock (video ahead by " + ((-driftNanos) / 1_000_000) + "ms)");
             }
 
             // Stage 1: Decode frame from video
@@ -446,6 +476,31 @@ public class VideoPlayer {
             framesSkipped.incrementAndGet();
             return currentFrame.get();
         }
+    }
+
+    private int dropFramesSequential(int framesToDrop) throws Exception {
+        int dropped = 0;
+        for (int i = 0; i < framesToDrop; i++) {
+            Frame droppedFrame = grabber.grabImage();
+            if (droppedFrame == null || droppedFrame.image == null) {
+                onVideoComplete();
+                return dropped;
+            }
+            dropped++;
+        }
+        return dropped;
+    }
+
+    private void logAvSync(String message) {
+        if (!avSyncDebugLogging) {
+            return;
+        }
+        long now = System.nanoTime();
+        if (now - lastAvSyncLogNanos < 1_000_000_000L) {
+            return;
+        }
+        lastAvSyncLogNanos = now;
+        plugin.getLogger().fine(message);
     }
 
     private void onVideoComplete() {

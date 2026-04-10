@@ -14,6 +14,24 @@ performance:
   # Maximum packets per tick per player (higher = more bandwidth, smoother video)
   max-packets-per-tick: 150
 
+  # Audio/video sync strategy for playback timing drift.
+  av-sync:
+    # Drift threshold in milliseconds before catch-up starts.
+    # 150ms is conservative and avoids overreacting to minor jitter.
+    threshold-ms: 150
+
+    # Maximum sequential frames dropped per processing cycle while behind.
+    # Keep this modest to avoid decode spikes on low-core hosts.
+    max-drop-frames-per-cycle: 8
+
+    # If drift exceeds this many frames, use a hard decoder seek as fallback.
+    # Large jumps are better handled by seek than dropping hundreds of frames.
+    hard-seek-threshold-frames: 120
+
+
+    # Enables rate-limited debug logging for A/V sync corrections.
+    debug-logging: false
+
   # Number of threads for frame processing
   processing-threads: 4
 
