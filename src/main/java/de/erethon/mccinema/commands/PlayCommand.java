@@ -241,11 +241,7 @@ public class PlayCommand extends ECommand {
                                     String url = hostedPack.url();
                                     byte[] hash = hostedPack.hash();
 
-                                    String prompt = plugin.getConfig().getString("resourcepack.prompt",
-                                        "<yellow>This video requires a resource pack for audio playback");
                                     boolean required = plugin.getConfig().getBoolean("resourcepack.required", false);
-
-                                    Component promptComponent = MM.deserialize(prompt);
 
                                     // Update viewer cache before sending resource pack
                                     screen.updateViewerCache();
@@ -273,7 +269,7 @@ public class PlayCommand extends ECommand {
                                     }
 
                                     for (Player p : viewers) {
-                                        p.setResourcePack(url, hash, promptComponent, required);
+                                        p.addResourcePack(UUID.randomUUID(),url, hash, "This video requires a resource pack for audio playback", required);
                                         playerIds.add(p.getUniqueId());
                                     }
 
