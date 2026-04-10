@@ -38,11 +38,15 @@ This is optimized as best as possible (and likely better than many similar plugi
 The actual amount of traffic scales with two factors: Screen size, and how dynamic the video is. Videos with very little movement such as slideshows will barely generate any traffic.
 You can see live metrics, including bandwidth usage, using `/mcc debug <screen id>`.
 
-**Two examples on the same very large (17x7 blocks, 2176x896) screen:**
+**One example on a reasonably sized (7x4 blocks, 896x512) screen:**
+- [Server Trailer](https://www.youtube.com/watch?v=R-HWAiNj9Nw): Average 3 MB/s
+    * This screen size gives you good enough resolution for most content
+
+**Two examples on a very large (17x7 blocks, 2176x896) screen:**
 - [Bad Apple](https://www.youtube.com/watch?v=FtutLA63Cp8): Average 5 MB/s
-    * Only two colors, pillarboxing on both sides, many large same-color areas -> low bandwidth usage
+    * Only two colors, pillarboxing on both sides, many large same-color areas -> lower bandwidth usage
 - [Bite Marks](https://www.youtube.com/watch?v=I76wvt0aEE4): Average 30 MB/s
-    * Many colors, full CS format, very quick scenes -> high bandwidth usage
+    * Many colors, full CS format, very quick scenes -> very high bandwidth usage
 
 ---
 
