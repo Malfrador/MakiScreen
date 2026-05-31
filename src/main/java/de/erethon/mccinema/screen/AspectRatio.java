@@ -26,14 +26,6 @@ public enum AspectRatio {
         return displayName;
     }
 
-    public int getWidthRatio() {
-        return widthRatio;
-    }
-
-    public int getHeightRatio() {
-        return heightRatio;
-    }
-
     public static AspectRatio fromString(String name) {
         for (AspectRatio ratio : values()) {
             if (ratio.name().equalsIgnoreCase(name) || ratio.displayName.equalsIgnoreCase(name)) {
@@ -66,10 +58,6 @@ public enum AspectRatio {
         }
 
         return new int[]{bestWidth, bestHeight};
-    }
-
-    public int[] calculatePixelDimensions(int mapWidth, int mapHeight) {
-        return new int[]{mapWidth * 128, mapHeight * 128};
     }
 }
 

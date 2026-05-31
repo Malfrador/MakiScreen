@@ -17,6 +17,8 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.Buffer;
+import java.nio.ByteBuffer;
+import java.nio.FloatBuffer;
 import java.nio.ShortBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -40,7 +42,7 @@ public class AudioManager {
     private final File audioDir;
     private final List<AudioChunk> chunks = new ArrayList<>();
     private final int chunkDurationMs; // 0 = single file mode
-    private final boolean positionalAudio; // true = mono (3D positional), false = stereo (global)
+    private final boolean positionalAudio; // broken right now
 
     private final AtomicInteger currentChunkIndex = new AtomicInteger(-1);
     private final AtomicBoolean isPlaying = new AtomicBoolean(false);
@@ -147,8 +149,7 @@ public class AudioManager {
                 outputChannels = 2;
             }
 
-            // For positional audio, use mono — Minecraft plays stereo sounds globally regardless of
-            // location, while mono sounds are attenuated by distance for true 3D positioning.
+            // Would be cool if this works
             if (positionalAudio && outputChannels > 1) {
                 plugin.getLogger().info("Positional audio mode: downmixing " + outputChannels +
                                        " channels to mono for 3D positioning.");
@@ -184,7 +185,6 @@ public class AudioManager {
                 extractChunksSequentially(fullAudio, sampleRate, outputChannels);
             }
 
-            // Keep full audio file for reference/debugging
             fullAudio.delete();
 
             File completionMarker = new File(audioDir, ".extraction_complete");
@@ -223,7 +223,7 @@ public class AudioManager {
             }
         }
 
-        // Flush the encoder by recording null frame
+        // Flush the encoder by recording null frame. Apparently needed?
         try {
             recorder.record((Frame) null);
         } catch (Exception e) {
@@ -244,7 +244,7 @@ public class AudioManager {
 
         plugin.getLogger().info("Sample rate: " + sampleRate + ", Samples per " + (chunkDurationMs / 1000) + "s chunk: " + samplesPerChunk);
 
-        // Extract full audio as WAV (PCM) for sample-accurate processing
+        // Extract full audio as WAV (PCM) first to ensure we have a consistent, uncompressed format to stream from
         File fullWav = new File(audioDir, "full_audio.wav");
         convertToWav(fullAudio, fullWav, sampleRate, channels);
 
@@ -254,7 +254,7 @@ public class AudioManager {
         grabber.setSampleFormat(avutil.AV_SAMPLE_FMT_S16); // PCM 16-bit for WAV
         grabber.start();
 
-        // Buffer for the current chunk only (typically a few MB)
+        // Buffer for the current chunk only
         float[][] chunkBuffer = new float[channels][samplesPerChunk];
         int chunkBufferPos = 0;
         int chunkIndex = 0;
@@ -290,7 +290,7 @@ public class AudioManager {
                     totalSamplesProcessed += chunkBufferPos;
                     chunkIndex++;
                     chunkBufferPos = 0;
-                    // Re-allocate buffer for next chunk (allows GC of previous data if needed)
+                    // Re-allocate buffer for next chunk
                     chunkBuffer = new float[channels][samplesPerChunk];
                 }
             }
@@ -336,15 +336,11 @@ public class AudioManager {
             writeBuffer = buffer;
         }
 
-        // Write chunk as WAV first
+        // Write chunk as WAV first, then convert
         File chunkWav = new File(audioDir, "chunk_" + chunkIndex + ".wav");
         writeWavFromSamples(chunkWav, writeBuffer, sampleRate, channels);
-
-        // Convert WAV to OGG
         File chunkOgg = new File(audioDir, "chunk_" + chunkIndex + ".ogg");
         convertWavToOgg(chunkWav, chunkOgg, sampleRate, channels);
-
-        // Delete intermediate WAV
         chunkWav.delete();
 
         long startMs = (long) chunkIndex * chunkDurationMs;
@@ -389,8 +385,8 @@ public class AudioManager {
         }
 
         // interleaved S16 format
-        java.nio.Buffer buffer = frame.samples[0];
-        if (buffer instanceof java.nio.ShortBuffer shortBuffer) {
+        Buffer buffer = frame.samples[0];
+        if (buffer instanceof ShortBuffer shortBuffer) {
             shortBuffer.rewind();
             int totalSamples = shortBuffer.remaining();
             int samplesPerChannel = totalSamples / channels;
@@ -413,7 +409,7 @@ public class AudioManager {
             float[][] result = new float[channels][samplesPerChannel];
 
             for (int ch = 0; ch < channels; ch++) {
-                java.nio.FloatBuffer floatBuffer = ((java.nio.ByteBuffer) frame.samples[ch]).asFloatBuffer();
+                FloatBuffer floatBuffer = ((ByteBuffer) frame.samples[ch]).asFloatBuffer();
                 floatBuffer.rewind();
                 floatBuffer.get(result[ch]);
             }
@@ -497,7 +493,7 @@ public class AudioManager {
         File packDir = new File(plugin.getDataFolder(), "resourcepack");
 
         // Always start with a clean pack directory so that audio from previously-played
-        // videos does not accumulate and end up in this video's resource pack zip.
+        // videos does not accumulate
         if (packDir.exists()) {
             try {
                 Files.walk(packDir.toPath())
@@ -711,23 +707,6 @@ public class AudioManager {
                 }
             }
         }.runTaskTimer(plugin, 1L, 1L);
-    }
-
-
-    public boolean isPlaying() {
-        return isPlaying.get();
-    }
-
-    public int getCurrentChunkIndex() {
-        return currentChunkIndex.get();
-    }
-
-    public int getTotalChunks() {
-        return chunks.size();
-    }
-
-    public long getTotalDurationMs() {
-        return totalDurationMs;
     }
 
     public void cleanup() {

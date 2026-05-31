@@ -86,7 +86,6 @@ public class DownloadCommand extends ECommand {
 
         // Check if yt-dlp needs to be initialized
         if (!downloadManager.ensureInitialized()) {
-            // Need user consent
             sender.sendMessage(MM.deserialize("<yellow>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
             sender.sendMessage(MM.deserialize("<gold><bold>YouTube Download - First Time Setup"));
             sender.sendMessage(MM.deserialize(""));

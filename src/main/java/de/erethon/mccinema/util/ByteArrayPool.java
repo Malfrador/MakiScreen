@@ -48,14 +48,6 @@ public class ByteArrayPool {
         TILE_BUFFERS.get().release();
     }
 
-    public static byte[] getLargeBuffer(int size) {
-        return LARGE_BUFFERS.get().acquire(size);
-    }
-
-    public static void releaseLargeBuffer() {
-        LARGE_BUFFERS.get().release();
-    }
-
     public static class ResizableByteBuffer {
         private byte[] buffer = new byte[0];
 

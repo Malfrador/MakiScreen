@@ -147,7 +147,6 @@ public class PlayCommand extends ECommand {
             public void run() {
                 VideoPlayer player = new VideoPlayer(plugin, screen);
 
-                // Always start playback in balanced preset unless the command overrides specific knobs.
                 QualityCommand.applyBalancedPreset(player);
 
                 // Set dithering mode before processing any frames
@@ -230,7 +229,7 @@ public class PlayCommand extends ECommand {
                             }
                         });
 
-                        // Send resource pack to all online players if audio is enabled
+                        // Send resource pack to all viewers
                         if (withAudio && finalAudioManager != null) {
                             ResourcePackManager rpManager = plugin.getResourcePackManager();
                             if (rpManager != null && plugin.getConfig().getBoolean("resourcepack.auto-apply", true)) {
@@ -283,7 +282,6 @@ public class PlayCommand extends ECommand {
                                         videoId + "_" + System.currentTimeMillis(),
                                         playerIds,
                                         (success) -> {
-                                            // Start playback after resource pack is loaded
                                             new BukkitRunnable() {
                                                 @Override
                                                 public void run() {
@@ -306,8 +304,6 @@ public class PlayCommand extends ECommand {
                                         },
                                         200L // 10 second timeout
                                     );
-
-                                    // Don't start playback immediately
                                     return;
                                 }
                             }
@@ -421,7 +417,6 @@ public class PlayCommand extends ECommand {
         }
 
         if (args.length >= 4) {
-            // Check what the previous argument was
             String prevArg = args[args.length - 2];
 
             if (prevArg.equalsIgnoreCase("--audio")) {
@@ -435,7 +430,6 @@ public class PlayCommand extends ECommand {
                     .toList();
             }
 
-            // Suggest flags
             return List.of("--audio", "--dither");
         }
 

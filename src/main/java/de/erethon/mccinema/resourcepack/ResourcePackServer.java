@@ -73,22 +73,12 @@ public class ResourcePackServer {
         }
     }
 
-    public void unregisterResourcePack(String videoId) {
-        resourcePacks.remove(videoId);
-        packHashes.remove(videoId);
-        plugin.getLogger().info("Unregistered resource pack for video: " + videoId);
-    }
-
     public String getResourcePackUrl(String videoId) {
         return "http://" + serverAddress + ":" + port + "/" + videoId + ".zip";
     }
 
     public byte[] getResourcePackHash(String videoId) {
         return packHashes.get(videoId);
-    }
-
-    public boolean hasResourcePack(String videoId) {
-        return resourcePacks.containsKey(videoId);
     }
 
     private byte[] calculateSHA1(File file) throws Exception {

@@ -13,22 +13,12 @@ public class MapTile implements ConfigurationSerializable {
     public static final int SIZE = 128;
     public static final int TOTAL_PIXELS = SIZE * SIZE;
 
-    // Block-based dirty detection - divides tile into smaller blocks for more efficient updates
-    public static final int BLOCK_SIZE = 16; // 16x16 blocks (8x8 blocks per tile)
-    public static final int BLOCKS_PER_SIDE = SIZE / BLOCK_SIZE; // 8 blocks per side
-
     // Minimum pixel change threshold - if fewer pixels changed, skip the update
     // This prevents sending updates for imperceptible changes (e.g., dithering noise)
-    // INCREASED from 8 to 16 for better bandwidth savings
     private static final int MIN_CHANGE_THRESHOLD = 16;
 
-    // Additional threshold: minimum change density (changed pixels / total pixels)
-    // Skip updates with <0.2% change density (less than ~33 pixels in 128x128 tile)
+    // minimum change density (changed pixels / total pixels)
     private static final float MIN_CHANGE_DENSITY = 0.002f;
-
-    // Multi-region detection: if dirty blocks are sparse, send multiple small regions
-    // instead of one large bounding box (reduces bandwidth when changes are scattered)
-    private static final float SPARSE_THRESHOLD = 0.4f; // If <40% of bounding box blocks are dirty, use multi-region
 
     private final int mapId;
     private final int tileX;
@@ -84,99 +74,6 @@ public class MapTile implements ConfigurationSerializable {
         this.lastFrameData = data;
     }
 
-    public DirtyRegion getDirtyRegion() {
-        return dirtyRegion;
-    }
-
-    public void setDirtyRegion(DirtyRegion dirtyRegion) {
-        this.dirtyRegion = dirtyRegion;
-    }
-
-    public boolean needsFullUpdate() {
-        return needsFullUpdate;
-    }
-
-    public void setNeedsFullUpdate(boolean needsFullUpdate) {
-        this.needsFullUpdate = needsFullUpdate;
-    }
-
-    public void clearDirtyRegion() {
-        this.dirtyRegion = null;
-    }
-
-    public DirtyRegion calculateDirtyRegion(byte[] newData) {
-        if (needsFullUpdate || lastFrameData == null) {
-            needsFullUpdate = false;
-            unchangedFrameCount = 0;
-            return new DirtyRegion(0, 0, SIZE, SIZE, newData);
-        }
-
-        // Quick check: if arrays are identical, no changes needed
-        if (Arrays.equals(lastFrameData, newData)) {
-            unchangedFrameCount++;
-            return null;
-        }
-
-        int minX = SIZE, minY = SIZE, maxX = -1, maxY = -1;
-        int changedPixelCount = 0;
-
-        // Row-based scanning with pixel counting
-        for (int y = 0; y < SIZE; y++) {
-            int rowOffset = y * SIZE;
-
-            for (int x = 0; x < SIZE; x++) {
-                int index = rowOffset + x;
-                if (lastFrameData[index] != newData[index]) {
-                    changedPixelCount++;
-                    if (x < minX) minX = x;
-                    if (x > maxX) maxX = x;
-                    if (y < minY) minY = y;
-                    if (y > maxY) maxY = y;
-                }
-            }
-        }
-
-        if (maxX < 0) {
-            unchangedFrameCount++;
-            return null; // No changes
-        }
-
-        // Skip updates with very few changed pixels (imperceptible noise)
-        if (changedPixelCount < MIN_CHANGE_THRESHOLD) {
-            // Still track as "unchanged" for optimization purposes
-            unchangedFrameCount++;
-            return null;
-        }
-
-        // Also skip if change density is too low (sparse scattered changes = likely noise)
-        float changeDensity = (float)changedPixelCount / TOTAL_PIXELS;
-        if (changeDensity < MIN_CHANGE_DENSITY) {
-            unchangedFrameCount++;
-            return null;
-        }
-
-        unchangedFrameCount = 0;
-        int width = maxX - minX + 1;
-        int height = maxY - minY + 1;
-
-        byte[] patchData = new byte[width * height];
-        for (int y = 0; y < height; y++) {
-            int srcOffset = (minY + y) * SIZE + minX;
-            int dstOffset = y * width;
-            System.arraycopy(newData, srcOffset, patchData, dstOffset, width);
-        }
-
-        return new DirtyRegion(minX, minY, width, height, patchData, changedPixelCount);
-    }
-
-    public int getUnchangedFrameCount() {
-        return unchangedFrameCount;
-    }
-
-    public void resetUnchangedFrameCount() {
-        unchangedFrameCount = 0;
-    }
-
     public int getFramesSinceLastSend() {
         return framesSinceLastSend;
     }
@@ -210,9 +107,7 @@ public class MapTile implements ConfigurationSerializable {
     }
 
     /**
-     * Calculate dirty region compared to what was actually SENT to clients,
-     * not just what was processed. This ensures skipped frames accumulate properly.
-     * Optimized with word-aligned long comparisons for 8x faster unchanged region detection.
+     * Calculate dirty region compared to what was sent
      */
     public DirtyRegion calculateDirtyRegionFromSent(byte[] newData) {
         if (needsFullUpdate || lastSentData == null) {
@@ -220,10 +115,8 @@ public class MapTile implements ConfigurationSerializable {
             return new DirtyRegion(0, 0, SIZE, SIZE, newData);
         }
 
-        // Fast path: Arrays.mismatch uses SIMD instructions for quick comparison
         int firstDiff = Arrays.mismatch(lastSentData, newData);
         if (firstDiff < 0) {
-            // Arrays are identical
             return null;
         }
 
@@ -237,20 +130,19 @@ public class MapTile implements ConfigurationSerializable {
         Arrays.fill(rowMaxX, -1);
 
         // Row-based scanning with 8-byte word-aligned comparisons
-        // This reduces memory accesses by 8x for unchanged regions
         for (int y = 0; y < SIZE; y++) {
             int rowOffset = y * SIZE;
             boolean rowHasChanges = false;
 
-            // Compare in 8-byte chunks for efficiency (aligned long comparisons)
+            // Compare in 8-byte chunks
             int x = 0;
             int limit = SIZE - 8;
 
-            // Process 8 bytes at a time using long comparisons (8x faster)
+            // Process 8 bytes at a time using long comparisons
             for (; x <= limit; x += 8) {
                 int idx = rowOffset + x;
 
-                // Compare 8 bytes as a single long (MUCH faster than 8 byte comparisons)
+                // Compare 8 bytes as a single long
                 long oldLong = ((long)(lastSentData[idx] & 0xFF)) |
                               ((long)(lastSentData[idx + 1] & 0xFF) << 8) |
                               ((long)(lastSentData[idx + 2] & 0xFF) << 16) |
@@ -360,7 +252,6 @@ public class MapTile implements ConfigurationSerializable {
 
     public record DirtyRegion(int x, int y, int width, int height, byte[] data, int changedPixelCount) {
 
-        // Constructor for full map updates
         public DirtyRegion(int x, int y, int width, int height, byte[] data) {
             this(x, y, width, height, data, width * height);
         }
@@ -377,13 +268,6 @@ public class MapTile implements ConfigurationSerializable {
             return (float) getDataSize() / TOTAL_PIXELS * 100f;
         }
 
-        /**
-         * Returns the density of changes within the dirty region.
-         * Higher density means more actual pixel changes within the bounding box.
-         */
-        public float getChangeDensity() {
-            return (float) changedPixelCount / getDataSize();
-        }
     }
 }
 

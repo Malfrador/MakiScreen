@@ -29,34 +29,32 @@ public class PacketDispatcher {
         FULL_MAP
     }
 
-    // Maximum bytes to send per frame (helps with very large screens)
-    // Increased to 10MB to support full-screen updates on 40x16 screens (640 tiles)
-    // Each tile is 128x128 = 16KB, so 640 tiles = ~10MB for full update
+    // Maximum bytes to send per frame
     private static final int DEFAULT_MAX_BYTES_PER_FRAME = 10 * 1024 * 1024; // 10 MB
 
-    // Target packets per second - used for adaptive limiting on large screens (when NOT using bundles)
+    // Target packets per second
     private static final int TARGET_PACKETS_PER_SECOND = 1800;
 
-    // Staleness tuning - higher values make skipped tiles catch up faster
+    // Staleness
     private static final int STALENESS_FACTOR = 500; // Each frame of staleness adds this much priority
     private static final int MAX_STALENESS_FRAMES = 5; // Cap - after 5 frames, tile gets max priority boost (2500)
     private static final int CRITICAL_STALENESS_FRAMES = 3; // After this many frames, tile is CRITICAL
 
-    // Minimum guaranteed updates per frame to prevent total starvation
+    // Minimum guaranteed updates per frame to prevent total starvation of low-priority tiles (
     private static final int MIN_UPDATES_PER_FRAME = 4;
 
     // Scene change detection - when this % of tiles have significant changes, it's a scene cut
     private static final float SCENE_CHANGE_THRESHOLD = 0.6f; // 60% of tiles with major changes
     private static final int SCENE_CHANGE_PIXEL_THRESHOLD = MapTile.TOTAL_PIXELS / 2; // 50% of tile changed = major change
 
-    // Minimum dirty region size to bother sending (skip tiny updates unless accumulated)
+    // Minimum dirty region size to bother sending
     private static final int MIN_DIRTY_REGION_PIXELS = 32;
 
     // Aggressive bandwidth reduction: skip tiles with low-entropy changes (dither noise)
     private boolean useEntropyFiltering = true;
     private int minUniqueColorsThreshold = 3; // Skip tiles with <3 changed colors (likely noise)
 
-    // Spatial downsampling: in low-motion scenes, update tiles in a checkerboard pattern
+    // in low-motion scenes, update tiles in a checkerboard pattern
     private boolean useSpatialDownsampling = true;
     private int frameCounter = 0;
 
@@ -86,7 +84,7 @@ public class PacketDispatcher {
     private int sceneChangeFramesRemaining = 0;
     private static final int SCENE_CHANGE_SPREAD_FRAMES = 2;
 
-    // Bundle packet option - reduces packet overhead
+    // Bundle packet option to not spam the client with thousands of packets-per-second
     private boolean useBundlePackets = true;
 
     // Patch generation settings
@@ -124,21 +122,9 @@ public class PacketDispatcher {
         this.adaptiveFlatThreshold = clampDouble(plugin.getConfig().getDouble("performance.bandwidth.adaptive.flat-threshold", 0.70), 0.0, 1.0);
     }
 
-    public void setMaxBytesPerFrame(int maxBytesPerFrame) {
-        this.maxBytesPerFrame = maxBytesPerFrame;
-    }
-
     public void setFrameRate(double frameRate) {
         this.currentFrameRate = Math.max(1.0, frameRate);
         updateAdaptiveLimit();
-    }
-
-    public void setUseBundlePackets(boolean useBundlePackets) {
-        this.useBundlePackets = useBundlePackets;
-    }
-
-    public boolean isUsingBundlePackets() {
-        return useBundlePackets;
     }
 
     public void setUseEntropyFiltering(boolean useEntropyFiltering) {
@@ -151,10 +137,6 @@ public class PacketDispatcher {
 
     public void setMinUniqueColorsThreshold(int minUniqueColorsThreshold) {
         this.minUniqueColorsThreshold = clamp(minUniqueColorsThreshold, 1, 32);
-    }
-
-    public int getMinUniqueColorsThreshold() {
-        return minUniqueColorsThreshold;
     }
 
     public void setUseSpatialDownsampling(boolean useSpatialDownsampling) {
@@ -699,7 +681,7 @@ public class PacketDispatcher {
 
     /**
      * Compare tiles spatially in scanline order (top to bottom, left to right).
-     * This ensures tiles are sent in the order the client renders them, reducing checkerboarding.
+     * This ensures tiles are sent in the order the client renders them
      */
     private int compareSpatially(MapTile a, MapTile b) {
         int yCmp = Integer.compare(a.getTileY(), b.getTileY());
@@ -769,12 +751,10 @@ public class PacketDispatcher {
 
         if (useBundlePackets && packets.size() > 1) {
             // Bundle all map packets into a single bundle packet
-            // This reduces packet count from N to 1, significantly reducing overhead
             List<Packet<? super ClientGamePacketListener>> packetList = new ArrayList<>(packets);
             ClientboundBundlePacket bundlePacket = new ClientboundBundlePacket(packetList);
             connection.send(bundlePacket);
         } else {
-            // Send individual packets (fallback or single packet case)
             for (ClientboundMapItemDataPacket packet : packets) {
                 connection.send(packet);
             }
@@ -894,31 +874,10 @@ public class PacketDispatcher {
         return Math.max(min, Math.min(max, value));
     }
 
-    public void resetStats() {
-        totalPacketsSent.set(0);
-        totalBytesSent.set(0);
-    }
-
     public record TileUpdate(MapTile tile, MapTile.DirtyRegion dirtyRegion, byte[] mapData) {
-        // Backwards compatible constructor
-        public TileUpdate(MapTile tile, MapTile.DirtyRegion dirtyRegion) {
-            this(tile, dirtyRegion, null);
-        }
     }
 
     private record PreparedUpdate(TileUpdate update, List<MapTile.DirtyRegion> regions, int totalDataSize, int boundingSize) {
-    }
-
-    public int getPacketsSkippedLastFrame() {
-        return packetsSkippedLastFrame.get();
-    }
-
-    public int getBytesSkippedLastFrame() {
-        return bytesSkippedLastFrame.get();
-    }
-
-    public int getAdaptiveMaxPacketsPerFrame() {
-        return adaptiveMaxPacketsPerFrame;
     }
 
     public long getLastFrameByteCap() {
@@ -939,10 +898,6 @@ public class PacketDispatcher {
 
     public long getLastFrameFullMapBytes() {
         return lastFrameFullMapBytes.get();
-    }
-
-    public int getLastFramePacketCount() {
-        return lastFramePacketCount.get();
     }
 
     public long getLastFrameBytesSent() {

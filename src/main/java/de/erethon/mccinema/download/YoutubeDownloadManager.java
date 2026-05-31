@@ -5,6 +5,8 @@ import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
 
 import java.io.*;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.net.URL;
 import java.nio.channels.Channels;
 import java.nio.channels.ReadableByteChannel;
@@ -36,7 +38,7 @@ public class YoutubeDownloadManager {
             videosDirectory.mkdirs();
         }
 
-        // Determine OS and set executable path
+        // Determine OS
         String os = System.getProperty("os.name").toLowerCase();
         String exeName = os.contains("win") ? "yt-dlp.exe" : "yt-dlp";
         this.ytDlpExecutable = new File(plugin.getDataFolder(), exeName);
@@ -61,13 +63,9 @@ public class YoutubeDownloadManager {
         if (!plugin.getConfig().getBoolean("youtube.require-consent", true)) {
             return true;
         }
-
-        // Check if yt-dlp already exists
         if (ytDlpExecutable.exists()) {
             return true;
         }
-
-        // Check data file for stored consent
         File dataFile = new File(plugin.getDataFolder(), "data.yml");
         if (dataFile.exists()) {
             org.bukkit.configuration.file.YamlConfiguration data =
@@ -114,8 +112,6 @@ public class YoutubeDownloadManager {
                 return false;
             }
         }
-
-        // Start initialization
         initializeYtDlp();
         return true;
     }
@@ -203,7 +199,12 @@ public class YoutubeDownloadManager {
 
         plugin.getLogger().info("Downloading yt-dlp from: " + downloadUrl);
 
-        URL url = new URL(downloadUrl);
+        URL url;
+        try {
+            url = new URI(downloadUrl).toURL();
+        } catch (URISyntaxException e) {
+            throw new RuntimeException(e);
+        }
         try (ReadableByteChannel rbc = Channels.newChannel(url.openStream());
              FileOutputStream fos = new FileOutputStream(ytDlpExecutable)) {
             fos.getChannel().transferFrom(rbc, 0, Long.MAX_VALUE);
@@ -681,34 +682,12 @@ public class YoutubeDownloadManager {
     }
 
 
-    public DownloadTask getDownloadTask(UUID downloadId) {
-        return activeDownloads.get(downloadId);
-    }
-
-    public Map<UUID, DownloadTask> getActiveDownloads() {
-        return new HashMap<>(activeDownloads);
-    }
-
-    public boolean cancelDownload(UUID downloadId) {
-        DownloadTask task = activeDownloads.get(downloadId);
-        if (task != null) {
-            task.setState(DownloadState.CANCELLED);
-            activeDownloads.remove(downloadId);
-            return true;
-        }
-        return false;
-    }
-
     private String sanitizeFilename(String name) {
         String sanitized = name.replaceAll("[^a-zA-Z0-9.-]", "_");
         if (sanitized.length() > 200) {
             sanitized = sanitized.substring(0, 200);
         }
         return sanitized;
-    }
-
-    public File getVideosDirectory() {
-        return videosDirectory;
     }
 
     public boolean isReady() {

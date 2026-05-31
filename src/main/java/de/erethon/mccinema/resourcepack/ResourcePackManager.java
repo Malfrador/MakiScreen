@@ -48,14 +48,14 @@ public class ResourcePackManager {
             return null;
         }
 
-        // Check in-memory cache first
+        // Check cache
         HostedResourcePack existing = hostedPacks.get(videoId);
         if (existing != null) {
             plugin.getLogger().info("Resource pack already hosted for video: " + videoId);
             return existing;
         }
 
-        // For mcpacks mode, check persisted data before uploading
+        // For mcpacks mode, check persisted data before uploading because uploads are very slow
         if (mode == HostingMode.MCPACKS) {
             HostedResourcePack persisted = loadPersistedPack(videoId);
             if (persisted != null) {

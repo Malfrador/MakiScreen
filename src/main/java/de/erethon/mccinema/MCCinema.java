@@ -51,7 +51,6 @@ public final class MCCinema extends EPlugin implements Listener {
 
         saveDefaultConfig();
         reloadConfig();
-        // Copy any missing keys from the default config (e.g. newly added options)
         boolean configDirty = false;
         for (String key : getConfig().getDefaults().getKeys(true)) {
             if (!getConfig().isSet(key) && !(getConfig().getDefaults().get(key) instanceof org.bukkit.configuration.ConfigurationSection)) {

@@ -85,12 +85,10 @@ public class ScreenCreateCommand extends ECommand {
             return;
         }
 
-        // Create the screen
         Screen screen = plugin.getScreenManager().createScreen(name, mapWidth, mapHeight, aspectRatio);
         screen.setOrigin(targetBlock.getLocation());
         screen.setFacing(facing);
 
-        // Create maps and item frames
         boolean success = createScreenMaps(player, screen, targetBlock, facing);
 
         if (!success) {
@@ -101,7 +99,7 @@ public class ScreenCreateCommand extends ECommand {
 
         plugin.getScreenManager().saveScreens();
 
-        // Initialize screen to white
+        // broken, might be too early
         plugin.getScreenManager().fillScreenWithColor(screen, (byte) 34);
 
         int totalMaps = screen.getTotalMaps();
@@ -122,7 +120,6 @@ public class ScreenCreateCommand extends ECommand {
         List<ItemStack> maps = new ArrayList<>();
         List<ItemFrame> frames = new ArrayList<>();
 
-        // Create maps first
         for (int y = screen.getMapHeight() - 1; y >= 0; y--) {
             for (int x = 0; x < screen.getMapWidth(); x++) {
                 MapView mapView = plugin.getServer().createMap(player.getWorld());
@@ -146,7 +143,6 @@ public class ScreenCreateCommand extends ECommand {
             }
         }
 
-        // Place item frames
         int mapIndex = 0;
         for (int y = screen.getMapHeight() - 1; y >= 0; y--) {
             for (int x = 0; x < screen.getMapWidth(); x++) {

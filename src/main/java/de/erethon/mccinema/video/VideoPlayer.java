@@ -67,7 +67,7 @@ public class VideoPlayer {
     private volatile long lastAvSyncLogNanos;
 
     // Epoch counter incremented on seek/resume to invalidate in-flight tasks
-    // that were scheduled before the seek. Prevents stale rescheduling races.
+    // that were scheduled before the seek.
     private final AtomicLong playbackEpoch = new AtomicLong(0);
 
     // Stats
@@ -218,7 +218,7 @@ public class VideoPlayer {
             return;
         }
 
-        // Check for valid screen origin before starting playback
+        // Check for valid screen origin
         if (!screen.hasValidOrigin()) {
             plugin.getLogger().warning("Cannot play: Screen '" + screen.getName() + "' has no valid origin location");
             return;
@@ -227,7 +227,7 @@ public class VideoPlayer {
         state.set(State.PLAYING);
         notifyStateChange();
 
-        // Start viewer cache updater on main thread (updates every 10 ticks = 500ms)
+        // Start viewer cache updater on main thread
         screen.startViewerCacheUpdater(plugin, 10L);
 
         if (scheduler == null || scheduler.isShutdown()) {
@@ -389,8 +389,7 @@ public class VideoPlayer {
         }
         long frameStartTime = System.nanoTime();
         try {
-            // Audio plays at real-time speed via client-side OGG playback, so
-            // wall-clock time (relative to playbackStartTime) is the reference clock.
+            // Audio plays at real-time speed
             long elapsedNanos = frameStartTime - playbackStartTime;
             long videoPositionNanos = (long)(currentFrame.get() / frameRate * 1_000_000_000.0);
             long driftNanos = elapsedNanos - videoPositionNanos;
@@ -427,7 +426,7 @@ public class VideoPlayer {
                     }
                 }
             } else if (driftNanos < -avSyncThresholdNanos) {
-                // Video is ahead of the audio clock (e.g. after a seek race condition).
+                // Video is ahead of the audio
                 // Re-anchor the playback start time so drift resets to zero.
                 // The scheduling will naturally insert the correct delay for the next frame.
                 playbackStartTime = frameStartTime - videoPositionNanos;

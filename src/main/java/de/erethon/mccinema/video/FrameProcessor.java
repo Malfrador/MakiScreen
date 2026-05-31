@@ -57,7 +57,7 @@ public class FrameProcessor {
     private int[][] bandDitherBuffers;
     private int bandBufferWidth = -1;
 
-    // Source-resolution buffers for when source != target (persisted across frames)
+    // Source-resolution buffers for when source != target
     private byte[] sourceDitheredFrameData;
     private byte[] sourcePreviousDitheredFrame;
     private int[] sourcePreviousHash;
@@ -71,7 +71,7 @@ public class FrameProcessor {
     private float errorDiffusionStrength = 0.8f;
     private int errorThreshold = 4;
 
-    // Bandwidth-first adaptive tuning (content-aware dithering stabilization)
+    // Bandwidth-related tuning
     private boolean adaptiveTuningEnabled = true;
     private double adaptiveHighMotionThreshold = 0.12;
     private double adaptiveLowMotionThreshold = 0.05;
@@ -760,7 +760,7 @@ public class FrameProcessor {
      * Band-parallel Floyd-Steinberg dithering. Splits the image into horizontal bands,
      * each processed by a separate thread. Error propagation is contained within each band
      * (no cross-band propagation), which produces a negligible visual seam at band boundaries
-     * that is imperceptible in motion video.
+     * that is imperceptible in video.
      */
     private void ditherFrameFloydSteinberg(byte[] frameData, int width, int height, float errorStrength) {
         int widthMinus = width - 1;
@@ -823,7 +823,7 @@ public class FrameProcessor {
     }
 
     private void ditherFrameAtkinson(byte[] frameData, int width, int height, float errorStrength) {
-        // Slightly dampen Atkinson diffusion to better match video stability on map palettes.
+        // Slightly dampen Atkinson diffusion to better match video stability
         int errorStrengthFixed = (int) (Math.max(0.0f, Math.min(1.0f, errorStrength * 0.75f)) * 256.0f);
         int maxBands = Math.max(1, Runtime.getRuntime().availableProcessors() / 2);
         int numBands = Math.max(1, Math.min(maxBands, height / 32));
@@ -887,7 +887,6 @@ public class FrameProcessor {
     }
 
     private void ditherFrameStucki(byte[] frameData, int width, int height, float errorStrength) {
-        // Stucki keeps more detail; a smaller damping still helps reduce visible sparkle.
         int errorStrengthFixed = (int) (Math.max(0.0f, Math.min(1.0f, errorStrength * 0.85f)) * 256.0f);
         int maxBands = Math.max(1, Runtime.getRuntime().availableProcessors() / 2);
         int numBands = Math.max(1, Math.min(maxBands, height / 32));
@@ -1393,7 +1392,7 @@ public class FrameProcessor {
             if (Math.abs(red - prevR) <= temporalThreshold &&
                 Math.abs(green - prevG) <= temporalThreshold &&
                 Math.abs(blue - prevB) <= temporalThreshold) {
-                // Track drift while still reusing the previous palette index to reduce shimmer.
+                // Track drift while still reusing the previous palette index
                 prevHash[pixelIdx] = currentHash;
                 output[pixelIdx] = prevFrame[pixelIdx];
                 return true;

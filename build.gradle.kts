@@ -1,43 +1,41 @@
 import net.minecrell.pluginyml.bukkit.BukkitPluginDescription
 
 repositories {
-    mavenLocal()
-    maven("https://jitpack.io")
+    maven("https://repo.papermc.io/repository/maven-public/")
     maven("https://repo.erethon.de/snapshots/")
+    maven("https://jitpack.io")
     mavenCentral()
 }
 plugins {
     `java-library`
-    id("io.papermc.paperweight.userdev") version "2.0.0-beta.17"
-    id("xyz.jpenilla.run-paper") version "2.3.1"
+    id("io.papermc.paperweight.userdev") version "2.0.0-beta.21"
+    id("xyz.jpenilla.run-paper") version "3.0.2"
     id("com.gradleup.shadow") version "9.3.1"
     id("net.minecrell.plugin-yml.bukkit") version "0.5.1"
 }
 
 group = "cat.maki.makiscreen"
-version = "2.2.2"
+version = "2.2.3"
 
 java {
-    toolchain.languageVersion.set(JavaLanguageVersion.of(21))
+    toolchain.languageVersion.set(JavaLanguageVersion.of(25))
 }
 
 dependencies {
-    paperweight.paperDevBundle("1.21.11-R0.1-SNAPSHOT")
+    paperweight.paperDevBundle("26.1.2.build.+")
     implementation("de.erethon:bedrock:1.5.18") { isTransitive = false }
-
-    // JavaCV core library with FFmpeg
+    // FFmpeg
     implementation("org.bytedeco:javacv:1.5.10")
     implementation("org.bytedeco:ffmpeg:6.1.1-1.5.10:windows-x86_64")
     implementation("org.bytedeco:ffmpeg:6.1.1-1.5.10:linux-x86_64")
     implementation("org.bytedeco:javacpp:1.5.10")
-
-    // JSON library for yt-dlp output parsing
+    //  yt-dlp output parsing
     implementation("com.alibaba:fastjson:1.2.83")
 }
 
 paperweight {
     javaLauncher = javaToolchains.launcherFor {
-        languageVersion = JavaLanguageVersion.of(21)
+        languageVersion = JavaLanguageVersion.of(25)
     }
 }
 
@@ -48,12 +46,11 @@ tasks {
 
     compileJava {
         options.encoding = "UTF-8"
-        options.release.set(21)
-        options.compilerArgs.addAll(listOf("--enable-preview"))
+        options.release.set(25)
     }
 
     runServer {
-        minecraftVersion("1.21.11")
+        minecraftVersion("26.1.2")
     }
 
     reobfJar {
@@ -78,7 +75,7 @@ tasks {
     bukkit {
         load = BukkitPluginDescription.PluginLoadOrder.STARTUP
         main = "de.erethon.mccinema.MCCinema"
-        apiVersion = "1.21"
+        apiVersion = "26.1"
         authors = listOf("Maki", "Malfrador")
         name = "MCCinema"
         version = project.version.toString()

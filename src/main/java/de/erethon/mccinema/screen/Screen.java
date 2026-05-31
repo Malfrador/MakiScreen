@@ -22,7 +22,6 @@ public class Screen implements ConfigurationSerializable {
 
     public static final int MAP_SIZE = 128;
     public static final double VIEWER_DISTANCE = 32.0;
-    private static final long VIEWER_CACHE_EXPIRE_MS = 500;
 
     private final UUID id;
     private String name;
@@ -36,7 +35,6 @@ public class Screen implements ConfigurationSerializable {
 
     // Cached viewers list
     private volatile List<Player> cachedViewers = Collections.emptyList();
-    private volatile long lastViewerCacheUpdate = 0;
     private volatile int viewerUpdateTaskId = -1;
 
     public Screen(String name, int mapWidth, int mapHeight, AspectRatio aspectRatio) {
@@ -105,10 +103,6 @@ public class Screen implements ConfigurationSerializable {
         return tiles.get(index);
     }
 
-    public MapTile getTile(int x, int y) {
-        return tiles.get(y * mapWidth + x);
-    }
-
     public void addTile(MapTile tile) {
         tiles.add(tile);
     }
@@ -152,10 +146,6 @@ public class Screen implements ConfigurationSerializable {
         this.facing = facing;
     }
 
-    public World getWorld() {
-        return origin != null ? origin.getWorld() : null;
-    }
-
     public @NotNull Collection<Player> getViewers() {
         return cachedViewers;
     }
@@ -172,7 +162,6 @@ public class Screen implements ConfigurationSerializable {
         }
         Collection<Player> nearby = loc.getNearbyPlayers(VIEWER_DISTANCE);
         cachedViewers = new CopyOnWriteArrayList<>(nearby);
-        lastViewerCacheUpdate = System.currentTimeMillis();
     }
 
     public void startViewerCacheUpdater(Plugin plugin, long updateIntervalTicks) {
@@ -279,7 +268,7 @@ public class Screen implements ConfigurationSerializable {
             int x = (int) map.get("originX");
             int y = (int) map.get("originY");
             int z = (int) map.get("originZ");
-            // Create location with potentially null world - will be resolved lazily
+            // Create location with potentially null world
             origin = new Location(world, x, y, z);
         }
 

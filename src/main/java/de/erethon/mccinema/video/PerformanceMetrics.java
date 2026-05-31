@@ -40,7 +40,7 @@ public class PerformanceMetrics {
     private final AtomicLong totalFrameTimeNs = new AtomicLong(0);
     private final AtomicLong totalFrameCount = new AtomicLong(0);
 
-    // Output-based temporal stability: pixels kept unchanged due to hysteresis
+    // Output-based temporal stability: pixels kept unchanged
     private final AtomicLong pixelsKeptByOutputStability = new AtomicLong(0);
     private final AtomicLong totalPixelsProcessed = new AtomicLong(0);
 
@@ -300,63 +300,12 @@ public class PerformanceMetrics {
         lastMultiRegionCount = 0;
     }
 
-    public long getAvgFrameDecodeUs() { return avgFrameDecodeUs; }
-    public long getAvgImageConversionUs() { return avgImageConversionUs; }
-    public long getAvgDitheringUs() { return avgDitheringUs; }
-    public long getAvgUpscalingUs() { return avgUpscalingUs; }
-    public long getAvgTileExtractionUs() { return avgTileExtractionUs; }
-    public long getAvgPacketDispatchUs() { return avgPacketDispatchUs; }
-    public long getAvgPacketCreationUs() { return avgPacketCreationUs; }
-    public long getAvgPacketSendingUs() { return avgPacketSendingUs; }
-    public long getAvgTotalFrameUs() { return avgTotalFrameUs; }
 
     public long getLastFrameDecodeUs() { return lastFrameDecodeUs; }
-    public long getLastImageConversionUs() { return lastImageConversionUs; }
     public long getLastDitheringUs() { return lastDitheringUs; }
     public long getLastUpscalingUs() { return lastUpscalingUs; }
     public long getLastTileExtractionUs() { return lastTileExtractionUs; }
-    public long getLastPacketDispatchUs() { return lastPacketDispatchUs; }
-    public long getLastPacketCreationUs() { return lastPacketCreationUs; }
-    public long getLastPacketSendingUs() { return lastPacketSendingUs; }
     public long getLastTotalFrameUs() { return lastTotalFrameUs; }
-
-    public long getFrameDecodeCount() { return frameDecodeCount.get(); }
-    public long getImageConversionCount() { return imageConversionCount.get(); }
-    public long getDitheringCount() { return ditheringCount.get(); }
-    public long getUpscalingCount() { return upscalingCount.get(); }
-    public long getTileExtractionCount() { return tileExtractionCount.get(); }
-    public long getPacketDispatchCount() { return packetDispatchCount.get(); }
-    public long getPacketCreationCount() { return packetCreationCount.get(); }
-    public long getPacketSendingCount() { return packetSendingCount.get(); }
-    public long getTotalFrameCount() { return totalFrameCount.get(); }
-
-    public float getLastOutputStabilityPercent() { return lastOutputStabilityPercent; }
-    public float getLastMotionAdaptivePercent() { return lastMotionAdaptivePercent; }
-    public float getLastLuminanceAdaptivePercent() { return lastLuminanceAdaptivePercent; }
-    public float getLastBlockDetectionSavingsPercent() { return lastBlockDetectionSavingsPercent; }
-    public int getLastDirtyTileCount() { return lastDirtyTileCount; }
-    public int getLastSkippedTileCount() { return lastSkippedTileCount; }
-    public int getLastMultiRegionCount() { return lastMultiRegionCount; }
-
-    public long getPixelsKeptByOutputStability() { return pixelsKeptByOutputStability.get(); }
-    public long getTotalPixelsProcessed() { return totalPixelsProcessed.get(); }
-    public long getMotionReducedErrorPixels() { return motionReducedErrorPixels.get(); }
-    public long getLuminanceAdaptedPixels() { return luminanceAdaptedPixels.get(); }
-    public long getBytesSavedByBlockDetection() { return bytesSavedByBlockDetection.get(); }
-    public long getTotalDirtyBytes() { return totalDirtyBytes.get(); }
-    public long getTilesWithChanges() { return tilesWithChanges.get(); }
-    public long getTilesSkipped() { return tilesSkipped.get(); }
-    public long getMultiRegionTiles() { return multiRegionTiles.get(); }
-
-    public float getOverallOutputStabilityPercent() {
-        long total = totalPixelsProcessed.get();
-        return total > 0 ? (float) pixelsKeptByOutputStability.get() / total * 100f : 0;
-    }
-
-    public float getOverallBlockDetectionSavingsPercent() {
-        long total = totalDirtyBytes.get();
-        return total > 0 ? (float) bytesSavedByBlockDetection.get() / total * 100f : 0;
-    }
 
 }
 
