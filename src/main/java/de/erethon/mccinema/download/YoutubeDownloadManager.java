@@ -311,17 +311,23 @@ public class YoutubeDownloadManager {
      * Detect or extract ffmpeg from JavaCV
      */
     private void detectFfmpeg() {
-        // Use ffmpeg from JavaCV's bundled native libraries
         try {
-            String ffmpegExe = org.bytedeco.javacpp.Loader.load(org.bytedeco.ffmpeg.ffmpeg.class);
+            String platform = org.bytedeco.javacpp.Loader.getPlatform();
+            String executableName = platform.startsWith("windows") ? "ffmpeg.exe" : "ffmpeg";
+            File ffmpegExe = org.bytedeco.javacpp.Loader.cacheResource(
+                "org/bytedeco/ffmpeg/" + platform + "/" + executableName
+            );
 
-            if (ffmpegExe != null && new File(ffmpegExe).exists()) {
-                ffmpegPath = ffmpegExe;
+            if (ffmpegExe != null && ffmpegExe.exists()) {
+                if (!platform.startsWith("windows")) {
+                    ffmpegExe.setExecutable(true);
+                }
+                ffmpegPath = ffmpegExe.getAbsolutePath();
                 plugin.getLogger().info("Using ffmpeg from JavaCV: " + ffmpegPath);
                 return;
             }
-        } catch (Exception e) {
-            plugin.getLogger().warning("Could not load ffmpeg from JavaCV: " + e.getMessage());
+        } catch (Throwable t) {
+            plugin.getLogger().warning("Could not load ffmpeg from JavaCV: " + t.getClass().getSimpleName() + ": " + t.getMessage());
         }
 
         // If JavaCV's ffmpeg fails, try system PATH as fallback
@@ -692,6 +698,27 @@ public class YoutubeDownloadManager {
 
     public boolean isReady() {
         return ytDlpReady;
+    }
+
+    public List<String> createYtDlpBaseCommand() {
+        List<String> command = new ArrayList<>();
+        command.add(ytDlpExecutable.getAbsolutePath());
+
+        File cookiesFile = new File(plugin.getDataFolder(), "youtube_cookies.txt");
+        if (cookiesFile.exists()) {
+            command.add("--cookies");
+            command.add(cookiesFile.getAbsolutePath());
+        }
+
+        command.add("--remote-components");
+        command.add("ejs:github");
+
+        if (jsRuntimePath != null) {
+            command.add("--js-runtimes");
+            command.add(jsRuntimePath);
+        }
+
+        return command;
     }
 
     public static class VideoInfo {

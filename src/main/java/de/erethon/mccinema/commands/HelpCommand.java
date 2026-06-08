@@ -31,7 +31,9 @@ public class HelpCommand extends ECommand {
               <white>/mcc info <screen></white> <gray>- Show screen details
             
             <yellow>Playback Control:</yellow>
-              <white>/mcc play <screen> <file> [--audio]</white> <gray>- Play a video
+              <white>/mcc play <screen> <file-or-url> [--audio]</white> <gray>- Play a video or livestream
+              <white>/mcc play bigscreen https://www.youtube.com/watch?v=...</white> <gray>- Play YouTube live
+              <white>/mcc play bigscreen https://www.twitch.tv/channel</white> <gray>- Play Twitch live
               <white>/mcc pause <screen></white> <gray>- Pause playback
               <white>/mcc resume <screen></white> <gray>- Resume playback
               <white>/mcc stop <screen></white> <gray>- Stop playback

@@ -29,6 +29,8 @@ dependencies {
     implementation("org.bytedeco:ffmpeg:6.1.1-1.5.10:windows-x86_64")
     implementation("org.bytedeco:ffmpeg:6.1.1-1.5.10:linux-x86_64")
     implementation("org.bytedeco:javacpp:1.5.10")
+    implementation("org.bytedeco:javacpp:1.5.10:windows-x86_64")
+    implementation("org.bytedeco:javacpp:1.5.10:linux-x86_64")
     //  yt-dlp output parsing
     implementation("com.alibaba:fastjson:1.2.83")
 }

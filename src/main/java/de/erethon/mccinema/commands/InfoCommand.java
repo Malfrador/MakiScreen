@@ -52,6 +52,7 @@ public class InfoCommand extends ECommand {
         info.append("<gray>  Resolution: <white>").append(screen.getPixelWidth()).append("x")
             .append(screen.getPixelHeight()).append("</white> pixels\n");
         info.append("<gray>  Aspect Ratio: <white>").append(screen.getAspectRatio().getDisplayName()).append("</white>\n");
+        info.append("<gray>  Quality Preset: <white>").append(screen.getQualityPreset().toLowerCase()).append("</white>\n");
 
         if (screen.getOrigin() != null) {
             info.append("<gray>  Location: <white>").append(formatLocation(screen)).append("</white>\n");
@@ -63,17 +64,24 @@ public class InfoCommand extends ECommand {
 
             if (player.getVideoFile() != null) {
                 info.append("<gray>  Video: <white>").append(player.getVideoFile().getName()).append("</white>\n");
+            } else if (player.isLiveStream()) {
+                info.append("<gray>  Stream: <white>").append(player.getSourceName()).append("</white>\n");
             }
 
             if (player.getState() == VideoPlayer.State.PLAYING || player.getState() == VideoPlayer.State.PAUSED) {
                 String currentTime = VideoPlayer.formatDuration(player.getCurrentTimeMs());
-                String totalTime = VideoPlayer.formatDuration(player.getTotalDurationMs());
-                double progress = player.getProgress() * 100;
+                if (player.isLiveStream()) {
+                    info.append("<gray>  Progress: <red>LIVE</red> <white>").append(currentTime).append("</white>\n");
+                    info.append("<gray>  Frame: <white>").append(player.getCurrentFrame()).append("</white>\n");
+                } else {
+                    String totalTime = VideoPlayer.formatDuration(player.getTotalDurationMs());
+                    double progress = player.getProgress() * 100;
 
-                info.append("<gray>  Progress: <white>").append(currentTime).append(" / ").append(totalTime)
-                    .append("</white> (").append(String.format("%.1f", progress)).append("%)\n");
-                info.append("<gray>  Frame: <white>").append(player.getCurrentFrame()).append(" / ")
-                    .append(player.getTotalFrames()).append("</white>\n");
+                    info.append("<gray>  Progress: <white>").append(currentTime).append(" / ").append(totalTime)
+                        .append("</white> (").append(String.format("%.1f", progress)).append("%)\n");
+                    info.append("<gray>  Frame: <white>").append(player.getCurrentFrame()).append(" / ")
+                        .append(player.getTotalFrames()).append("</white>\n");
+                }
                 info.append("<gray>  Frame Rate: <white>").append(String.format("%.1f", player.getFrameRate()))
                     .append("</white> fps\n");
             }

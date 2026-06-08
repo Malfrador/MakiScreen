@@ -51,6 +51,11 @@ public class SeekCommand extends ECommand {
             return;
         }
 
+        if (player.isLiveStream()) {
+            sender.sendMessage(MM.deserialize("<red>Cannot seek a livestream."));
+            return;
+        }
+
         long timeMs = parseTime(timeStr);
         if (timeMs < 0) {
             sender.sendMessage(MM.deserialize("<red>Invalid time format! Use: [HH:]MM:SS or seconds"));

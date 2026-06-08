@@ -2,6 +2,8 @@ package de.erethon.mccinema.commands;
 
 import de.erethon.mccinema.MCCinema;
 import de.erethon.mccinema.audio.AudioManager;
+import de.erethon.mccinema.download.LivestreamResolver;
+import de.erethon.mccinema.download.YoutubeDownloadManager;
 import de.erethon.mccinema.resourcepack.ResourcePackManager;
 import de.erethon.mccinema.screen.Screen;
 import de.erethon.mccinema.video.FrameProcessor;
@@ -29,6 +31,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.Locale;
 
 public class PlayCommand extends ECommand {
 
@@ -45,14 +48,14 @@ public class PlayCommand extends ECommand {
         setPlayerCommand(true);
         setConsoleCommand(true);
         setMinArgs(0);
-        setMaxArgs(8);
-        setHelp("/mcc play <screen> <file> [--audio [chunk_seconds|single]] [--positional] [--dither <mode>]");
+        setMaxArgs(9);
+        setHelp("/mcc play <screen> <file-or-url> [--audio [chunk_seconds|single]] [--positional] [--dither <mode>]");
     }
 
     @Override
     public void onExecute(String[] args, CommandSender sender) {
         if (args.length < 3) {
-            sender.sendMessage(MM.deserialize("<red>Usage: /mcc play <screen> <file> [--audio [chunk_seconds|single]] [--positional] [--dither <mode>]"));
+            sender.sendMessage(MM.deserialize("<red>Usage: /mcc play <screen> <file-or-url> [--audio [chunk_seconds|single]] [--positional] [--dither <mode>]"));
             return;
         }
 
@@ -64,8 +67,9 @@ public class PlayCommand extends ECommand {
         boolean positionalAudio = false;
         int chunkDurationMs = AudioManager.DEFAULT_CHUNK_DURATION_MS;
         FrameProcessor.DitheringMode ditheringMode = FrameProcessor.DitheringMode.FLOYD_STEINBERG_REDUCED; // Default
+        boolean acceptConsent = false;
 
-        // Parse arguments for --audio, --positional, and --dither flags
+        // Parse arguments for --audio, --positional, --dither, and --accept flags
         for (int i = 3; i < args.length; i++) {
             if (args[i].equalsIgnoreCase("--audio")) {
                 audioFlag = true;
@@ -91,6 +95,8 @@ public class PlayCommand extends ECommand {
                 }
             } else if (args[i].equalsIgnoreCase("--positional")) {
                 positionalAudio = true;
+            } else if (args[i].equalsIgnoreCase("--accept")) {
+                acceptConsent = true;
             } else if (args[i].equalsIgnoreCase("--dither")) {
                 if (i + 1 < args.length) {
                     String modeArg = args[i + 1].toUpperCase();
@@ -118,6 +124,11 @@ public class PlayCommand extends ECommand {
         }
 
         Screen screen = screenOpt.get();
+
+        if (isUrl(fileName)) {
+            playLivestream(sender, screen, fileName, withAudio, ditheringMode, acceptConsent);
+            return;
+        }
 
         File videoFile = new File(plugin.getDataFolder(), "videos/" + fileName);
         if (!videoFile.exists()) {
@@ -147,7 +158,7 @@ public class PlayCommand extends ECommand {
             public void run() {
                 VideoPlayer player = new VideoPlayer(plugin, screen);
 
-                QualityCommand.applyBalancedPreset(player);
+                QualityCommand.applyScreenPreset(player, screen);
 
                 // Set dithering mode before processing any frames
                 player.getFrameProcessor().setDitheringMode(finalDitheringMode);
@@ -354,16 +365,20 @@ public class PlayCommand extends ECommand {
                     return;
                 }
 
-                float progress = (float) player.getProgress();
+                float progress = player.isLiveStream() ? 1f : (float) player.getProgress();
                 progressBar.progress(Math.min(1f, Math.max(0f, progress)));
                 progressBar.color(BossBar.Color.GREEN);
 
                 String currentTime = VideoPlayer.formatDuration(player.getCurrentTimeMs());
-                String totalTime = VideoPlayer.formatDuration(player.getTotalDurationMs());
+                String totalTime = player.isLiveStream() ? "LIVE" : VideoPlayer.formatDuration(player.getTotalDurationMs());
 
-                progressBar.name(MM.deserialize(
-                    "<green>▶</green> <white>" + currentTime + " / " + totalTime + "</white>"
-                ));
+                if (player.isLiveStream()) {
+                    progressBar.name(MM.deserialize("<red>LIVE</red> <white>" + currentTime + "</white>"));
+                } else {
+                    progressBar.name(MM.deserialize(
+                        "<green>▶</green> <white>" + currentTime + " / " + totalTime + "</white>"
+                    ));
+                }
             }
         }.runTaskTimer(plugin, 0L, 10L);
     }
@@ -434,6 +449,112 @@ public class PlayCommand extends ECommand {
         }
 
         return List.of();
+    }
+
+    private void playLivestream(CommandSender sender, Screen screen, String sourceUrl, boolean requestedAudio,
+                                FrameProcessor.DitheringMode ditheringMode, boolean acceptConsent) {
+        YoutubeDownloadManager downloadManager = plugin.getYoutubeDownloadManager();
+
+        if (acceptConsent && !downloadManager.hasUserConsent()) {
+            downloadManager.saveUserConsent(true);
+            sender.sendMessage(MM.deserialize("<green>✓ Thank you! Downloading yt-dlp..."));
+            sender.sendMessage(MM.deserialize("<gray>This may take a moment. Please wait..."));
+        }
+
+        if (!downloadManager.ensureInitialized()) {
+            sender.sendMessage(MM.deserialize("<yellow>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
+            sender.sendMessage(MM.deserialize("<gold><bold>Livestream Playback - First Time Setup"));
+            sender.sendMessage(MM.deserialize(""));
+            sender.sendMessage(MM.deserialize("<white>To play YouTube and Twitch livestreams, MCCinema needs <gold>yt-dlp</gold>."));
+            sender.sendMessage(MM.deserialize("<gray>What will be downloaded:"));
+            sender.sendMessage(MM.deserialize("<white>  • <gray>yt-dlp binary (<gold>~10MB</gold>)"));
+            sender.sendMessage(MM.deserialize("<white>  • <gray>From: <gold>https://github.com/yt-dlp/yt-dlp"));
+            sender.sendMessage(MM.deserialize(""));
+            sender.sendMessage(MM.deserialize("<white>To proceed, run:"));
+            sender.sendMessage(MM.deserialize("<click:suggest_command:/mcc play " + screen.getName() + " " + sourceUrl + " --accept><gold><bold>[CLICK HERE]</bold></gold></click> <gray>or type: <white>/mcc play " + screen.getName() + " " + sourceUrl + " --accept"));
+            sender.sendMessage(MM.deserialize("<gray>This is a one-time setup. You won't be asked again."));
+            sender.sendMessage(MM.deserialize("<yellow>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
+            return;
+        }
+
+        if (!downloadManager.isReady()) {
+            sender.sendMessage(MM.deserialize("<yellow>yt-dlp is still initializing... Please wait a moment and try again."));
+            return;
+        }
+
+        if (requestedAudio) {
+            sender.sendMessage(MM.deserialize("<yellow>⚠ Live audio is not supported yet; starting video-only livestream playback."));
+        }
+
+        VideoPlayer existingPlayer = plugin.getVideoPlayer(screen);
+        if (existingPlayer != null && existingPlayer.getState() == VideoPlayer.State.PLAYING) {
+            existingPlayer.stop();
+        }
+
+        sender.sendMessage(MM.deserialize("<yellow>Resolving livestream..."));
+
+        new BukkitRunnable() {
+            @Override
+            public void run() {
+                try {
+                    LivestreamResolver resolver = new LivestreamResolver(plugin, downloadManager);
+                    LivestreamResolver.Livestream livestream = resolver.resolve(sourceUrl);
+
+                    VideoPlayer player = new VideoPlayer(plugin, screen);
+                    QualityCommand.applyScreenPreset(player, screen);
+                    player.getFrameProcessor().setDitheringMode(ditheringMode);
+
+                    new BukkitRunnable() {
+                        @Override
+                        public void run() {
+                            if (!player.loadLiveStream(livestream.streamUrl(), livestream.displayName())) {
+                                sender.sendMessage(MM.deserialize("<red>Failed to load livestream!"));
+                                return;
+                            }
+
+                            plugin.registerVideoPlayer(screen, player);
+
+                            player.setOnComplete(p -> {
+                                stopProgressBar();
+                                Bukkit.broadcast(MM.deserialize("<gray>Livestream playback ended."));
+                            });
+
+                            player.setOnStateChange(p -> {
+                                if (p.getState() == VideoPlayer.State.PLAYING) {
+                                    startProgressBar(p);
+                                } else if (p.getState() == VideoPlayer.State.STOPPED || p.getState() == VideoPlayer.State.IDLE) {
+                                    stopProgressBar();
+                                }
+                            });
+
+                            player.play();
+                            String ditherInfo = "\n<gray>  Dithering: <white>" + formatDitheringMode(ditheringMode);
+                            sender.sendMessage(MM.deserialize(
+                                "<green>▶ Now playing live: <white>" + livestream.displayName() +
+                                "\n<gray>  On screen: <white>" + screen.getName() +
+                                "\n<gray>  Duration: <red>LIVE" +
+                                "\n<gray>  Frame rate: <white>" + String.format("%.1f", player.getFrameRate()) + " fps" +
+                                ditherInfo +
+                                "\n<gray>  Audio: <yellow>Not supported for livestreams"
+                            ));
+                        }
+                    }.runTask(plugin);
+                } catch (Exception e) {
+                    new BukkitRunnable() {
+                        @Override
+                        public void run() {
+                            sender.sendMessage(MM.deserialize("<red>Failed to resolve livestream!"));
+                            sender.sendMessage(MM.deserialize("<gray>Error: " + e.getMessage()));
+                        }
+                    }.runTask(plugin);
+                }
+            }
+        }.runTaskAsynchronously(plugin);
+    }
+
+    private boolean isUrl(String source) {
+        String lower = source.toLowerCase(Locale.ROOT);
+        return lower.startsWith("http://") || lower.startsWith("https://");
     }
 }
 

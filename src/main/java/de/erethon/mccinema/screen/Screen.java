@@ -32,6 +32,7 @@ public class Screen implements ConfigurationSerializable {
     private Location origin;
     private BlockFace facing;
     private String worldName;
+    private String qualityPreset = "BALANCED";
 
     // Cached viewers list
     private volatile List<Player> cachedViewers = Collections.emptyList();
@@ -47,7 +48,7 @@ public class Screen implements ConfigurationSerializable {
     }
 
     private Screen(UUID id, String name, int mapWidth, int mapHeight, AspectRatio aspectRatio,
-                   List<MapTile> tiles, Location origin, BlockFace facing, String worldName) {
+                   List<MapTile> tiles, Location origin, BlockFace facing, String worldName, String qualityPreset) {
         this.id = id;
         this.name = name;
         this.mapWidth = mapWidth;
@@ -57,6 +58,9 @@ public class Screen implements ConfigurationSerializable {
         this.origin = origin;
         this.facing = facing;
         this.worldName = worldName;
+        if (qualityPreset != null && !qualityPreset.isBlank()) {
+            this.qualityPreset = qualityPreset;
+        }
     }
 
     public UUID getId() {
@@ -146,6 +150,16 @@ public class Screen implements ConfigurationSerializable {
         this.facing = facing;
     }
 
+    public String getQualityPreset() {
+        return qualityPreset;
+    }
+
+    public void setQualityPreset(String qualityPreset) {
+        if (qualityPreset != null && !qualityPreset.isBlank()) {
+            this.qualityPreset = qualityPreset;
+        }
+    }
+
     public @NotNull Collection<Player> getViewers() {
         return cachedViewers;
     }
@@ -222,6 +236,7 @@ public class Screen implements ConfigurationSerializable {
         map.put("mapWidth", mapWidth);
         map.put("mapHeight", mapHeight);
         map.put("aspectRatio", aspectRatio.name());
+        map.put("qualityPreset", qualityPreset);
 
         List<Map<String, Object>> tileData = new ArrayList<>();
         for (MapTile tile : tiles) {
@@ -277,7 +292,8 @@ public class Screen implements ConfigurationSerializable {
             facing = BlockFace.valueOf((String) map.get("facing"));
         }
 
-        return new Screen(id, name, mapWidth, mapHeight, aspectRatio, tiles, origin, facing, worldName);
+        String qualityPreset = (String) map.getOrDefault("qualityPreset", "BALANCED");
+        return new Screen(id, name, mapWidth, mapHeight, aspectRatio, tiles, origin, facing, worldName, qualityPreset);
     }
 }
 

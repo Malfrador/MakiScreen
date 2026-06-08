@@ -15,6 +15,8 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.scheduler.BukkitRunnable;
+import org.bytedeco.ffmpeg.global.avutil;
+import org.bytedeco.javacv.FFmpegLogCallback;
 
 import java.io.File;
 import java.util.Map;
@@ -47,7 +49,7 @@ public final class MCCinema extends EPlugin implements Listener {
         super.onEnable();
         instance = this;
 
-        //FFmpegLogCallback.set(); Very spammy, only enable for debugging
+        configureFfmpegLogging();
 
         saveDefaultConfig();
         reloadConfig();
@@ -110,6 +112,15 @@ public final class MCCinema extends EPlugin implements Listener {
         getServer().getPluginManager().registerEvents(resourcePackListener, this);
         logger.info("MCCinema enabled!");
         logger.info("  Screens loaded: " + screenManager.getAllScreens().size());
+    }
+
+    private void configureFfmpegLogging() {
+        try {
+            FFmpegLogCallback.setLevel(avutil.AV_LOG_WARNING);
+            avutil.av_log_set_level(avutil.AV_LOG_WARNING);
+        } catch (Throwable t) {
+            logger.warning("Could not configure FFmpeg log level: " + t.getClass().getSimpleName() + ": " + t.getMessage());
+        }
     }
 
     @Override

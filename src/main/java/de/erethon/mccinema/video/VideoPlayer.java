@@ -13,8 +13,10 @@ import java.awt.Graphics2D;
 import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
 import java.io.File;
+import java.util.ArrayDeque;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.Queue;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ScheduledExecutorService;
@@ -37,17 +39,29 @@ public class VideoPlayer {
     private final PacketDispatcher packetDispatcher;
 
     private File videoFile;
+    private String sourceName;
+    private boolean liveStream;
     private FFmpegFrameGrabber grabber;
     private Java2DFrameConverter converter;
     private ScheduledExecutorService scheduler;
     private ScheduledFuture<?> playbackTask;
+    private ScheduledExecutorService liveDecoderExecutor;
 
     private final AtomicReference<State> state = new AtomicReference<>(State.IDLE);
     private final AtomicLong currentFrame = new AtomicLong(0);
     private final AtomicLong totalFrames = new AtomicLong(0);
 
     private double frameRate = 30.0;
+    private double sourceFrameRate = 30.0;
     private long videoDurationMs;
+    private volatile boolean liveDecoderRunning;
+    private volatile boolean liveBufferReady;
+    private final Object liveFrameLock = new Object();
+    private final Queue<BufferedImage> liveFrameQueue = new ArrayDeque<>();
+
+    private static final double LIVE_TARGET_FRAME_RATE = 20.0;
+    private static final int LIVE_START_BUFFER_FRAMES = 20;
+    private static final int LIVE_MAX_BUFFER_FRAMES = 50;
 
     private Consumer<VideoPlayer> onComplete;
     private Consumer<VideoPlayer> onStateChange;
@@ -66,17 +80,13 @@ public class VideoPlayer {
     private final boolean avSyncDebugLogging;
     private volatile long lastAvSyncLogNanos;
 
-    // Epoch counter incremented on seek/resume to invalidate in-flight tasks
-    // that were scheduled before the seek.
     private final AtomicLong playbackEpoch = new AtomicLong(0);
 
-    // Stats
     private final AtomicLong framesProcessed = new AtomicLong(0);
     private final AtomicLong framesSkipped = new AtomicLong(0);
     private long lastFrameTime;
-    private volatile long lastDriftNanos = 0; // For debug HUD
+    private volatile long lastDriftNanos = 0;
 
-    // Debug metrics
     private final Set<UUID> debugEnabledPlayers = Collections.synchronizedSet(new HashSet<>());
     private long debugLastUpdateTime = System.nanoTime();
     private int debugFrameCount = 0;
@@ -84,7 +94,6 @@ public class VideoPlayer {
     private long debugAverageFrameProcessTime = 0;
     private final PerformanceMetrics performanceMetrics;
 
-    // Reusable objects
     private BufferedImage resizedImageBuffer;
     private Graphics2D resizedGraphics;
 
@@ -117,6 +126,8 @@ public class VideoPlayer {
         }
 
         this.videoFile = videoFile;
+        this.sourceName = videoFile.getName();
+        this.liveStream = false;
         state.set(State.LOADING);
         notifyStateChange();
 
@@ -127,16 +138,57 @@ public class VideoPlayer {
 
             grabber = new FFmpegFrameGrabber(videoFile);
             grabber.start();
+            return initializeStartedGrabber(videoFile.getName(), false);
+        } catch (Exception e) {
+            plugin.getLogger().severe("Failed to load video: " + e.getMessage());
+            state.set(State.IDLE);
+            notifyStateChange();
+            return false;
+        }
+    }
 
-            frameRate = grabber.getFrameRate();
-            if (frameRate <= 0 || frameRate > 120) {
-                frameRate = 20.0;
+    public boolean loadLiveStream(String streamUrl, String displayName) {
+        if (state.get() == State.PLAYING) {
+            stop();
+        }
+
+        this.videoFile = null;
+        this.sourceName = displayName;
+        this.liveStream = true;
+        state.set(State.LOADING);
+        notifyStateChange();
+
+        try {
+            if (grabber != null) {
+                grabber.close();
             }
+
+            grabber = new FFmpegFrameGrabber(streamUrl);
+            grabber.setOption("reconnect", "1");
+            grabber.setOption("reconnect_streamed", "1");
+            grabber.setOption("reconnect_delay_max", "5");
+            grabber.start();
+            return initializeStartedGrabber(displayName, true);
+        } catch (Exception e) {
+            plugin.getLogger().severe("Failed to load livestream: " + e.getMessage());
+            state.set(State.IDLE);
+            notifyStateChange();
+            return false;
+        }
+    }
+
+    private boolean initializeStartedGrabber(String label, boolean live) {
+        try {
+            sourceFrameRate = grabber.getFrameRate();
+            if (sourceFrameRate <= 0 || sourceFrameRate > 120) {
+                sourceFrameRate = 20.0;
+            }
+            frameRate = live ? LIVE_TARGET_FRAME_RATE : sourceFrameRate;
 
             packetDispatcher.setFrameRate(frameRate);
 
-            totalFrames.set(grabber.getLengthInVideoFrames());
-            videoDurationMs = grabber.getLengthInTime() / 1000;
+            totalFrames.set(live ? 0 : grabber.getLengthInVideoFrames());
+            videoDurationMs = live ? 0 : grabber.getLengthInTime() / 1000;
             int videoWidth = grabber.getImageWidth();
             int videoHeight = grabber.getImageHeight();
 
@@ -168,17 +220,26 @@ public class VideoPlayer {
                 }
             }
 
-            plugin.getLogger().info("Loaded video: " + videoFile.getName());
+            plugin.getLogger().info((live ? "Loaded livestream: " : "Loaded video: ") + label);
             plugin.getLogger().info("  Resolution: " + videoWidth + "x" + videoHeight);
-            plugin.getLogger().info("  Frame rate: " + String.format("%.2f", frameRate) + " fps");
+            if (live) {
+                plugin.getLogger().info("  Source frame rate: " + String.format("%.2f", sourceFrameRate) + " fps");
+                plugin.getLogger().info("  Playback frame rate: " + String.format("%.2f", frameRate) + " fps");
+            } else {
+                plugin.getLogger().info("  Frame rate: " + String.format("%.2f", frameRate) + " fps");
+            }
 
-            if (Math.abs(frameRate - 20.0) > 0.5) {
+            if (!live && Math.abs(frameRate - 20.0) > 0.5) {
                 plugin.getLogger().warning("  Video framerate is not 20 FPS - playback may not be optimal!");
                 plugin.getLogger().warning("  For YouTube videos, download without --no-convert flag to auto-convert to 20 FPS");
             }
 
-            plugin.getLogger().info("  Duration: " + formatDuration(videoDurationMs));
-            plugin.getLogger().info("  Total frames: " + totalFrames.get());
+            if (live) {
+                plugin.getLogger().info("  Duration: LIVE");
+            } else {
+                plugin.getLogger().info("  Duration: " + formatDuration(videoDurationMs));
+                plugin.getLogger().info("  Total frames: " + totalFrames.get());
+            }
 
             // Check aspect ratio mismatch and inform about letterboxing/pillarboxing
             double videoAspect = (double) videoWidth / videoHeight;
@@ -197,7 +258,7 @@ public class VideoPlayer {
 
             return true;
         } catch (Exception e) {
-            plugin.getLogger().severe("Failed to load video: " + e.getMessage());
+            plugin.getLogger().severe("Failed to initialize video source: " + e.getMessage());
             state.set(State.IDLE);
             notifyStateChange();
             return false;
@@ -218,7 +279,6 @@ public class VideoPlayer {
             return;
         }
 
-        // Check for valid screen origin
         if (!screen.hasValidOrigin()) {
             plugin.getLogger().warning("Cannot play: Screen '" + screen.getName() + "' has no valid origin location");
             return;
@@ -227,7 +287,6 @@ public class VideoPlayer {
         state.set(State.PLAYING);
         notifyStateChange();
 
-        // Start viewer cache updater on main thread
         screen.startViewerCacheUpdater(plugin, 10L);
 
         if (scheduler == null || scheduler.isShutdown()) {
@@ -245,9 +304,11 @@ public class VideoPlayer {
         if (audioManager != null) {
             audioManager.play(screen.getCenterLocation());
         }
-        // Start with frame -1 so first frame will be frame 0
+        if (liveStream) {
+            startLiveDecoder();
+        }
         scheduleNextFrame(-1);
-        plugin.getLogger().info("Started playback of " + videoFile.getName());
+        plugin.getLogger().info("Started playback of " + sourceName);
     }
 
     public void pause() {
@@ -258,6 +319,9 @@ public class VideoPlayer {
         notifyStateChange();
         if (playbackTask != null) {
             playbackTask.cancel(false);
+        }
+        if (liveStream) {
+            stopLiveDecoder();
         }
         pausedAtFrame = currentFrame.get();
         if (audioManager != null) {
@@ -275,6 +339,9 @@ public class VideoPlayer {
         playbackStartTime = System.nanoTime() - (long)(pausedAtFrame / frameRate * 1_000_000_000L);
         if (audioManager != null) {
             audioManager.resume(screen.getCenterLocation());
+        }
+        if (liveStream) {
+            startLiveDecoder();
         }
         // Schedule from pausedAtFrame - 1 because processNextFrame will increment currentFrame
         scheduleNextFrame(pausedAtFrame - 1);
@@ -300,11 +367,12 @@ public class VideoPlayer {
         if (audioManager != null) {
             audioManager.stop();
         }
+        stopLiveDecoder();
 
         clearDebugActionBars();
 
         try {
-            if (grabber != null) {
+            if (grabber != null && !liveStream) {
                 grabber.setFrameNumber(0);
             }
         } catch (Exception ignored) {}
@@ -320,6 +388,10 @@ public class VideoPlayer {
 
     public void seek(long frameNumber) {
         if (grabber == null) return;
+        if (liveStream) {
+            plugin.getLogger().warning("Cannot seek a livestream");
+            return;
+        }
         try {
             frameNumber = Math.max(0, Math.min(frameNumber, totalFrames.get() - 1));
             grabber.setFrameNumber((int) frameNumber);
@@ -332,15 +404,11 @@ public class VideoPlayer {
             if (currentState == State.PAUSED || currentState == State.PLAYING) {
                 playbackStartTime = System.nanoTime() - (long)(frameNumber / frameRate * 1_000_000_000L);
             }
-            // If playing, we need to reschedule the next frame from the new position
             if (currentState == State.PLAYING) {
-                // Cancel the currently scheduled frame
                 if (playbackTask != null) {
                     playbackTask.cancel(false);
                 }
-                // Bump epoch so any in-flight processNextFrameAdaptive won't reschedule
                 playbackEpoch.incrementAndGet();
-                // Schedule from frameNumber - 1 because processNextFrame will increment currentFrame
                 scheduleNextFrame(frameNumber - 1);
             }
         } catch (Exception e) {
@@ -377,7 +445,6 @@ public class VideoPlayer {
     private void processNextFrameAdaptive() {
         long epoch = playbackEpoch.get();
         long currentFrameNumber = processNextFrame();
-        // Only reschedule if no seek/resume happened during processing
         if (playbackEpoch.get() == epoch) {
             scheduleNextFrame(currentFrameNumber);
         }
@@ -389,14 +456,12 @@ public class VideoPlayer {
         }
         long frameStartTime = System.nanoTime();
         try {
-            // Audio plays at real-time speed
             long elapsedNanos = frameStartTime - playbackStartTime;
             long videoPositionNanos = (long)(currentFrame.get() / frameRate * 1_000_000_000.0);
             long driftNanos = elapsedNanos - videoPositionNanos;
             lastDriftNanos = driftNanos;
 
-            if (driftNanos > avSyncThresholdNanos) {
-                // Calculate which frame we SHOULD be displaying right now
+            if (!liveStream && driftNanos > avSyncThresholdNanos) {
                 long targetFrame = (long)(elapsedNanos / 1_000_000_000.0 * frameRate);
                 long total = totalFrames.get();
                 if (targetFrame >= total) {
@@ -425,40 +490,47 @@ public class VideoPlayer {
                         }
                     }
                 }
-            } else if (driftNanos < -avSyncThresholdNanos) {
-                // Video is ahead of the audio
-                // Re-anchor the playback start time so drift resets to zero.
-                // The scheduling will naturally insert the correct delay for the next frame.
+            } else if (!liveStream && driftNanos < -avSyncThresholdNanos) {
                 playbackStartTime = frameStartTime - videoPositionNanos;
                 lastDriftNanos = 0;
                 logAvSync("A/V sync re-anchored playback clock (video ahead by " + ((-driftNanos) / 1_000_000) + "ms)");
             }
 
-            // Stage 1: Decode frame from video
             long decodeStart = System.nanoTime();
-            Frame frame = grabber.grabImage();
-            long decodeEnd = System.nanoTime();
-            if (frame == null || frame.image == null) {
-                onVideoComplete();
-                return currentFrame.get();
-            }
-            performanceMetrics.recordFrameDecode(decodeEnd - decodeStart);
-            long frameNum = currentFrame.getAndIncrement();
+            long frameNum = currentFrame.get();
+            BufferedImage image;
+            if (liveStream) {
+                image = pollLiveFrame();
+                long decodeEnd = System.nanoTime();
+                performanceMetrics.recordFrameDecode(decodeEnd - decodeStart);
+                if (image == null) {
+                    framesSkipped.incrementAndGet();
+                    return frameNum;
+                }
+                frameNum = currentFrame.getAndIncrement();
+            } else {
+                Frame frame = grabber.grabImage();
+                long decodeEnd = System.nanoTime();
+                if (frame == null || frame.image == null) {
+                    onVideoComplete();
+                    return currentFrame.get();
+                }
+                performanceMetrics.recordFrameDecode(decodeEnd - decodeStart);
+                frameNum = currentFrame.getAndIncrement();
 
-            // Stage 2: Convert to BufferedImage
-            long conversionStart = System.nanoTime();
-            BufferedImage image = converter.convert(frame);
-            long conversionEnd = System.nanoTime();
-            if (image == null) {
-                framesSkipped.incrementAndGet();
-                return frameNum;
+                long conversionStart = System.nanoTime();
+                image = converter.convert(frame);
+                long conversionEnd = System.nanoTime();
+                if (image == null) {
+                    framesSkipped.incrementAndGet();
+                    return frameNum;
+                }
+                performanceMetrics.recordImageConversion(conversionEnd - conversionStart);
             }
-            performanceMetrics.recordImageConversion(conversionEnd - conversionStart);
             FrameProcessor.ProcessedFrame processedFrame = frameProcessor.processFrame(
                 image, screen.getPixelWidth(), screen.getPixelHeight(), performanceMetrics
             );
 
-            // Stage 3: Dispatch packets
             long dispatchStart = System.nanoTime();
             packetDispatcher.dispatchFrame(screen, processedFrame.updates(), processedFrame.contentStats(), performanceMetrics);
             long dispatchEnd = System.nanoTime();
@@ -488,6 +560,96 @@ public class VideoPlayer {
             dropped++;
         }
         return dropped;
+    }
+
+    private BufferedImage pollLiveFrame() {
+        synchronized (liveFrameLock) {
+            if (!liveBufferReady) {
+                if (liveFrameQueue.size() >= LIVE_START_BUFFER_FRAMES) {
+                    liveBufferReady = true;
+                } else {
+                    return null;
+                }
+            }
+            return liveFrameQueue.poll();
+        }
+    }
+
+    private void startLiveDecoder() {
+        if (liveDecoderRunning) {
+            return;
+        }
+        liveDecoderRunning = true;
+        clearLiveFrameQueue();
+        liveDecoderExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "MCCinema-LiveDecoder");
+            t.setDaemon(true);
+            return t;
+        });
+        liveDecoderExecutor.execute(() -> {
+            Java2DFrameConverter liveConverter = new Java2DFrameConverter();
+            double sourceFramesPerOutputFrame = Math.max(1.0, sourceFrameRate / LIVE_TARGET_FRAME_RATE);
+            double nextOutputFrame = 0.0;
+            long sourceFrameIndex = 0;
+            while (liveDecoderRunning) {
+                try {
+                    Frame frame = grabber.grabImage();
+                    if (frame == null || frame.image == null) {
+                        continue;
+                    }
+                    boolean keepFrame = sourceFrameIndex + 0.0001 >= nextOutputFrame;
+                    sourceFrameIndex++;
+                    if (!keepFrame) {
+                        framesSkipped.incrementAndGet();
+                        continue;
+                    }
+                    nextOutputFrame += sourceFramesPerOutputFrame;
+
+                    BufferedImage image = liveConverter.convert(frame);
+                    if (image != null) {
+                        enqueueLiveFrame(copyImage(image));
+                    }
+                } catch (Exception e) {
+                    if (liveDecoderRunning) {
+                        plugin.getLogger().warning("Livestream decode stalled: " + e.getMessage());
+                    }
+                }
+            }
+        });
+    }
+
+    private void stopLiveDecoder() {
+        liveDecoderRunning = false;
+        if (liveDecoderExecutor != null) {
+            liveDecoderExecutor.shutdownNow();
+            liveDecoderExecutor = null;
+        }
+        clearLiveFrameQueue();
+    }
+
+    private void enqueueLiveFrame(BufferedImage image) {
+        synchronized (liveFrameLock) {
+            while (liveFrameQueue.size() >= LIVE_MAX_BUFFER_FRAMES) {
+                liveFrameQueue.poll();
+                framesSkipped.incrementAndGet();
+            }
+            liveFrameQueue.offer(image);
+        }
+    }
+
+    private void clearLiveFrameQueue() {
+        synchronized (liveFrameLock) {
+            liveFrameQueue.clear();
+            liveBufferReady = false;
+        }
+    }
+
+    private BufferedImage copyImage(BufferedImage source) {
+        BufferedImage copy = new BufferedImage(source.getWidth(), source.getHeight(), BufferedImage.TYPE_3BYTE_BGR);
+        Graphics2D graphics = copy.createGraphics();
+        graphics.drawImage(source, 0, 0, null);
+        graphics.dispose();
+        return copy;
     }
 
     private void logAvSync(String message) {
@@ -538,8 +700,6 @@ public class VideoPlayer {
         } catch (Exception ignored) {}
     }
 
-    // Getters
-
     public State getState() {
         return state.get();
     }
@@ -554,7 +714,7 @@ public class VideoPlayer {
 
     public double getProgress() {
         long total = totalFrames.get();
-        return total > 0 ? (double) currentFrame.get() / total : 0;
+        return !liveStream && total > 0 ? (double) currentFrame.get() / total : 0;
     }
 
     public long getCurrentTimeMs() {
@@ -563,6 +723,14 @@ public class VideoPlayer {
 
     public long getTotalDurationMs() {
         return videoDurationMs;
+    }
+
+    public boolean isLiveStream() {
+        return liveStream;
+    }
+
+    public String getSourceName() {
+        return sourceName;
     }
 
     public double getFrameRate() {
@@ -616,8 +784,6 @@ public class VideoPlayer {
             return String.format("%d:%02d", minutes, seconds % 60);
         }
     }
-
-    // Debug metrics methods
 
     public void enableDebug(UUID playerId) {
         debugEnabledPlayers.add(playerId);

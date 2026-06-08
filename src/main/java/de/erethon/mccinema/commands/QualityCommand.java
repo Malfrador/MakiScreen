@@ -43,14 +43,11 @@ public class QualityCommand extends ECommand {
             return;
         }
 
-        VideoPlayer videoPlayer = plugin.getVideoPlayer(screenOpt.get());
-        if (videoPlayer == null) {
-            sender.sendMessage(MM.deserialize("<red>No active video player for screen '<white>" + screenName + "</white>'."));
-            return;
-        }
+        Screen screen = screenOpt.get();
+        VideoPlayer videoPlayer = plugin.getVideoPlayer(screen);
 
         if (args.length == 2 || args[2].equalsIgnoreCase("show") || args[2].equalsIgnoreCase("status")) {
-            showCurrentSettings(sender, videoPlayer, screenName);
+            showCurrentSettings(sender, videoPlayer, screen);
             return;
         }
 
@@ -61,13 +58,26 @@ public class QualityCommand extends ECommand {
             return;
         }
 
-        applyPreset(videoPlayer, preset);
-        sender.sendMessage(MM.deserialize("<green>Applied quality preset <white>" + preset.name().toLowerCase(Locale.ROOT) + "</white> to screen <white>" + screenName + "</white>."));
-        showCurrentSettings(sender, videoPlayer, screenName);
+        screen.setQualityPreset(preset.name());
+        plugin.getScreenManager().saveScreens();
+
+        if (videoPlayer != null) {
+            applyPreset(videoPlayer, preset);
+            sender.sendMessage(MM.deserialize("<green>Applied and saved quality preset <white>" + preset.name().toLowerCase(Locale.ROOT) + "</white> for screen <white>" + screenName + "</white>."));
+        } else {
+            sender.sendMessage(MM.deserialize("<green>Saved quality preset <white>" + preset.name().toLowerCase(Locale.ROOT) + "</white> for screen <white>" + screenName + "</white>."));
+            sender.sendMessage(MM.deserialize("<gray>It will be applied the next time playback starts."));
+        }
+        showCurrentSettings(sender, videoPlayer, screen);
     }
 
     public static void applyBalancedPreset(VideoPlayer videoPlayer) {
         applyPreset(videoPlayer, QualityPreset.BALANCED);
+    }
+
+    public static void applyScreenPreset(VideoPlayer videoPlayer, Screen screen) {
+        QualityPreset preset = QualityPreset.fromInput(screen.getQualityPreset());
+        applyPreset(videoPlayer, preset != null ? preset : QualityPreset.BALANCED);
     }
 
     private static void applyPreset(VideoPlayer videoPlayer, QualityPreset preset) {
@@ -137,11 +147,19 @@ public class QualityCommand extends ECommand {
         }
     }
 
-    private void showCurrentSettings(CommandSender sender, VideoPlayer videoPlayer, String screenName) {
+    private void showCurrentSettings(CommandSender sender, VideoPlayer videoPlayer, Screen screen) {
+        String screenName = screen.getName();
+        sender.sendMessage(MM.deserialize("<gold>===== Video Preset Status for <white>" + screenName + "</white> ====="));
+        sender.sendMessage(MM.deserialize("<gray>Saved preset: <white>" + screen.getQualityPreset().toLowerCase(Locale.ROOT) + "</white>"));
+
+        if (videoPlayer == null) {
+            sender.sendMessage(MM.deserialize("<gray>No active video player. Saved preset will apply on next playback."));
+            return;
+        }
+
         FrameProcessor processor = videoPlayer.getFrameProcessor();
         PacketDispatcher dispatcher = videoPlayer.getPacketDispatcher();
 
-        sender.sendMessage(MM.deserialize("<gold>===== Video Preset Status for <white>" + screenName + "</white> ====="));
         sender.sendMessage(MM.deserialize("<gray>Dither: <white>" + processor.getDitheringMode() + "</white> | Diffusion: <white>" + String.format("%.2f", processor.getErrorDiffusionStrength()) + "</white> | ErrThr: <white>" + processor.getErrorThreshold() + "</white>"));
         sender.sendMessage(MM.deserialize("<gray>Temporal: <white>" + (processor.isUsingTemporalDithering() ? "ON" : "OFF") + "</white> | TThr: <white>" + processor.getTemporalThreshold() + "</white> | Quant: <white>" + processor.getErrorQuantizationBits() + "</white> | Adaptive: <white>" + (processor.isAdaptiveTuningEnabled() ? "ON" : "OFF") + "</white>"));
         sender.sendMessage(MM.deserialize("<gray>Patching: <white>" + dispatcher.getPatchStrategy() + "</white> | FullThr: <white>" + dispatcher.getFullUpdateThresholdPercent() + "%</white> | Block: <white>" + dispatcher.getMultiRegionBlockSize() + "</white> | MaxPatches: <white>" + dispatcher.getMaxPatchesPerTile() + "</white>"));
