@@ -47,6 +47,7 @@ public class StopCommand extends ECommand {
         }
 
         player.stop();
+        plugin.getScreenManager().fillScreenWithBlankColor(screenOpt.get());
         sender.sendMessage(MM.deserialize("<red>⏹ Stopped playback"));
     }
 

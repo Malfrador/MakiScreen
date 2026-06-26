@@ -6,6 +6,7 @@ import de.erethon.mccinema.download.YoutubeDownloadManager;
 import de.erethon.mccinema.resourcepack.ResourcePackManager;
 import de.erethon.mccinema.screen.Screen;
 import de.erethon.mccinema.screen.ScreenManager;
+import de.erethon.mccinema.video.PacketDispatcher;
 import de.erethon.mccinema.video.VideoPlayer;
 import de.erethon.bedrock.compatibility.Internals;
 import de.erethon.bedrock.plugin.EPlugin;
@@ -141,18 +142,29 @@ public final class MCCinema extends EPlugin implements Listener {
     @EventHandler
     public void onPlayerJoin(PlayerJoinEvent event) {
         // Send last frame to joining players
+        resendScreenFramesAfterJoin(event.getPlayer(), 20L);
+        resendScreenFramesAfterJoin(event.getPlayer(), 60L);
+        resendScreenFramesAfterJoin(event.getPlayer(), 120L);
+    }
+
+    private void resendScreenFramesAfterJoin(Player player, long delayTicks) {
         new BukkitRunnable() {
             @Override
             public void run() {
-                Player player = event.getPlayer();
-                for (VideoPlayer vp : videoPlayers.values()) {
-                    if (vp.getState() == VideoPlayer.State.PLAYING ||
-                        vp.getState() == VideoPlayer.State.PAUSED) {
-                        vp.getPacketDispatcher().sendLastFrameToPlayer(player, vp.getScreen());
+                if (!player.isOnline()) {
+                    return;
+                }
+
+                PacketDispatcher dispatcher = new PacketDispatcher(MCCinema.this);
+                for (Screen screen : screenManager.getAllScreens()) {
+                    VideoPlayer videoPlayer = getVideoPlayer(screen);
+                    if (videoPlayer != null && !videoPlayer.canSendTo(player)) {
+                        continue;
                     }
+                    dispatcher.sendLastFrameToPlayer(player, screen);
                 }
             }
-        }.runTaskLater(this, 20L);
+        }.runTaskLater(this, delayTicks);
     }
 
     public static MCCinema getInstance() {

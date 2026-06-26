@@ -23,9 +23,11 @@ import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.scheduler.BukkitTask;
 
 import java.io.File;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -48,14 +50,14 @@ public class PlayCommand extends ECommand {
         setPlayerCommand(true);
         setConsoleCommand(true);
         setMinArgs(0);
-        setMaxArgs(9);
-        setHelp("/mcc play <screen> <file-or-url> [--audio [chunk_seconds|single]] [--positional] [--dither <mode>]");
+        setMaxArgs(99);
+        setHelp("/mcc play <screen> <file-or-url> [--audio [chunk_seconds|single]] [--dither <mode>] [players...]");
     }
 
     @Override
     public void onExecute(String[] args, CommandSender sender) {
         if (args.length < 3) {
-            sender.sendMessage(MM.deserialize("<red>Usage: /mcc play <screen> <file-or-url> [--audio [chunk_seconds|single]] [--positional] [--dither <mode>]"));
+            sender.sendMessage(MM.deserialize("<red>Usage: /mcc play <screen> <file-or-url> [--audio [chunk_seconds|single]] [--dither <mode>] [players...]"));
             return;
         }
 
@@ -64,17 +66,16 @@ public class PlayCommand extends ECommand {
 
         // Parse optional flags
         boolean audioFlag = false;
-        boolean positionalAudio = false;
         int chunkDurationMs = AudioManager.DEFAULT_CHUNK_DURATION_MS;
         FrameProcessor.DitheringMode ditheringMode = FrameProcessor.DitheringMode.FLOYD_STEINBERG_REDUCED; // Default
-        boolean acceptConsent = false;
+        List<String> targetPlayerNames = new ArrayList<>();
 
-        // Parse arguments for --audio, --positional, --dither, and --accept flags
+        // Parse arguments for --audio, --dither, and optional target players
         for (int i = 3; i < args.length; i++) {
             if (args[i].equalsIgnoreCase("--audio")) {
                 audioFlag = true;
                 // Check for chunk duration argument
-                if (i + 1 < args.length && !args[i + 1].startsWith("--")) {
+                if (i + 1 < args.length && isAudioChunkArgument(args[i + 1])) {
                     String chunkArg = args[i + 1].toLowerCase();
                     if (chunkArg.equals("single") || chunkArg.equals("0")) {
                         chunkDurationMs = 0;
@@ -93,10 +94,6 @@ public class PlayCommand extends ECommand {
                     }
                     i++; // Skip the chunk duration argument
                 }
-            } else if (args[i].equalsIgnoreCase("--positional")) {
-                positionalAudio = true;
-            } else if (args[i].equalsIgnoreCase("--accept")) {
-                acceptConsent = true;
             } else if (args[i].equalsIgnoreCase("--dither")) {
                 if (i + 1 < args.length) {
                     String modeArg = args[i + 1].toUpperCase();
@@ -112,10 +109,19 @@ public class PlayCommand extends ECommand {
                     sender.sendMessage(MM.deserialize("<red>Missing dithering mode after --dither"));
                     return;
                 }
+            } else if (args[i].startsWith("--")) {
+                sender.sendMessage(MM.deserialize("<red>Unknown option: " + args[i]));
+                return;
+            } else {
+                targetPlayerNames.add(args[i]);
             }
         }
 
         final boolean withAudio = audioFlag;
+        Set<UUID> targetPlayerIds = resolveTargetPlayers(targetPlayerNames, sender);
+        if (targetPlayerIds == null) {
+            return;
+        }
 
         Optional<Screen> screenOpt = plugin.getScreenManager().getScreen(screenName);
         if (screenOpt.isEmpty()) {
@@ -126,7 +132,7 @@ public class PlayCommand extends ECommand {
         Screen screen = screenOpt.get();
 
         if (isUrl(fileName)) {
-            playLivestream(sender, screen, fileName, withAudio, ditheringMode, acceptConsent);
+            playLivestream(sender, screen, fileName, withAudio, ditheringMode, targetPlayerIds);
             return;
         }
 
@@ -152,11 +158,12 @@ public class PlayCommand extends ECommand {
         File finalVideoFile = videoFile;
         int finalChunkDurationMs = chunkDurationMs;
         FrameProcessor.DitheringMode finalDitheringMode = ditheringMode;
-        boolean finalPositionalAudio = positionalAudio;
+        Set<UUID> finalTargetPlayerIds = targetPlayerIds;
         new BukkitRunnable() {
             @Override
             public void run() {
                 VideoPlayer player = new VideoPlayer(plugin, screen);
+                player.setTargetPlayerIds(finalTargetPlayerIds);
 
                 QualityCommand.applyScreenPreset(player, screen);
 
@@ -167,12 +174,11 @@ public class PlayCommand extends ECommand {
 
                 if (withAudio) {
                     String videoId = finalVideoFile.getName().replaceAll("[^a-zA-Z0-9]", "_").toLowerCase();
-                    audioManager = new AudioManager(plugin, videoId, finalChunkDurationMs, finalPositionalAudio, screen);
+                    audioManager = new AudioManager(plugin, videoId, finalChunkDurationMs, false, screen);
 
                     String modeInfo = audioManager.isSingleFileMode() ? "single file" :
                                      (finalChunkDurationMs / 1000) + "s chunks";
-                    String audioMode = finalPositionalAudio ? "positional (3D mono)" : "global stereo";
-                    sender.sendMessage(MM.deserialize("<yellow>Extracting audio (" + modeInfo + ", " + audioMode + ")..."));
+                    sender.sendMessage(MM.deserialize("<yellow>Extracting audio (" + modeInfo + ", global stereo)..."));
 
 
                     if (audioManager.extractAndSplitAudio(finalVideoFile)) {
@@ -258,21 +264,25 @@ public class PlayCommand extends ECommand {
 
                                     // Collect player UUIDs to track
                                     Set<UUID> playerIds = new HashSet<>();
-                                    Collection<Player> viewers = screen.getViewers();
+                                    Collection<Player> viewers = getPlaybackViewers(player);
 
                                     if (viewers.isEmpty()) {
                                         sender.sendMessage(MM.deserialize(
-                                            "<yellow>⚠ No nearby players found to send resource pack to"));
+                                            player.hasTargetPlayerLimit()
+                                                ? "<yellow>⚠ No selected players are online to send resource pack to"
+                                                : "<yellow>⚠ No nearby players found to send resource pack to"));
                                         // Start playback immediately if no viewers
                                         player.play();
                                         String audioInfo = withAudio ? "\n<gray>  Audio: <green>✓ Enabled" : "";
                                         String ditherInfo = "\n<gray>  Dithering: <white>" + formatDitheringMode(finalDitheringMode);
+                                        String viewerInfo = formatViewerInfo(player);
                                         sender.sendMessage(MM.deserialize(
                                             "<green>▶ Now playing: <white>" + finalVideoFile.getName() +
                                             "\n<gray>  On screen: <white>" + screen.getName() +
                                             "\n<gray>  Duration: <white>" + VideoPlayer.formatDuration(player.getTotalDurationMs()) +
                                             "\n<gray>  Frame rate: <white>" + String.format("%.1f", player.getFrameRate()) + " fps" +
                                             ditherInfo +
+                                            viewerInfo +
                                             audioInfo
                                         ));
                                         return;
@@ -283,8 +293,9 @@ public class PlayCommand extends ECommand {
                                         playerIds.add(p.getUniqueId());
                                     }
 
+                                    String recipientLabel = player.hasTargetPlayerLimit() ? " selected player(s)" : " nearby player(s)";
                                     sender.sendMessage(MM.deserialize(
-                                        "<green>✓ Resource pack sent to " + playerIds.size() + " nearby player(s)"));
+                                        "<green>✓ Resource pack sent to " + playerIds.size() + recipientLabel));
                                     sender.sendMessage(MM.deserialize(
                                         "<yellow>⏳ Waiting for players to load resource pack..."));
 
@@ -300,6 +311,7 @@ public class PlayCommand extends ECommand {
 
                                                     String audioInfo = withAudio ? "\n<gray>  Audio: <green>✓ Enabled" : "";
                                                     String ditherInfo = "\n<gray>  Dithering: <white>" + formatDitheringMode(finalDitheringMode);
+                                                    String viewerInfo = formatViewerInfo(player);
                                                     String loadStatus = success ? "<green>✓ Resource pack loaded" : "<yellow>⚠ Started without waiting (timeout)";
                                                     sender.sendMessage(MM.deserialize(
                                                         "<green>▶ Now playing: <white>" + finalVideoFile.getName() +
@@ -307,6 +319,7 @@ public class PlayCommand extends ECommand {
                                                         "\n<gray>  Duration: <white>" + VideoPlayer.formatDuration(player.getTotalDurationMs()) +
                                                         "\n<gray>  Frame rate: <white>" + String.format("%.1f", player.getFrameRate()) + " fps" +
                                                         ditherInfo +
+                                                        viewerInfo +
                                                         audioInfo +
                                                         "\n<gray>  " + loadStatus
                                                     ));
@@ -325,12 +338,14 @@ public class PlayCommand extends ECommand {
 
                         String audioInfo = withAudio ? "\n<gray>  Audio: <green>✓ Enabled" : "";
                         String ditherInfo = "\n<gray>  Dithering: <white>" + formatDitheringMode(finalDitheringMode);
+                        String viewerInfo = formatViewerInfo(player);
                         sender.sendMessage(MM.deserialize(
                             "<green>▶ Now playing: <white>" + finalVideoFile.getName() +
                             "\n<gray>  On screen: <white>" + screen.getName() +
                             "\n<gray>  Duration: <white>" + VideoPlayer.formatDuration(player.getTotalDurationMs()) +
                             "\n<gray>  Frame rate: <white>" + String.format("%.1f", player.getFrameRate()) + " fps" +
                             ditherInfo +
+                            viewerInfo +
                             audioInfo
                         ));
                     }
@@ -351,7 +366,7 @@ public class PlayCommand extends ECommand {
             BossBar.Overlay.PROGRESS
         );
 
-        for (Player p : player.getScreen().getViewers()) {
+        for (Player p : getPlaybackViewers(player)) {
             p.showBossBar(progressBar);
         }
 
@@ -433,9 +448,13 @@ public class PlayCommand extends ECommand {
 
         if (args.length >= 4) {
             String prevArg = args[args.length - 2];
+            String currentArg = args[args.length - 1];
 
             if (prevArg.equalsIgnoreCase("--audio")) {
-                return List.of("single", "5", "10", "15", "30", "60");
+                return filterCompletions(currentArg, combinedCompletions(
+                    List.of("single", "5", "10", "15", "30", "60"),
+                    onlinePlayerNames()
+                ));
             }
 
             if (prevArg.equalsIgnoreCase("--dither")) {
@@ -445,21 +464,18 @@ public class PlayCommand extends ECommand {
                     .toList();
             }
 
-            return List.of("--audio", "--dither");
+            return filterCompletions(currentArg, combinedCompletions(
+                List.of("--audio", "--dither"),
+                onlinePlayerNames()
+            ));
         }
 
         return List.of();
     }
 
     private void playLivestream(CommandSender sender, Screen screen, String sourceUrl, boolean requestedAudio,
-                                FrameProcessor.DitheringMode ditheringMode, boolean acceptConsent) {
+                                FrameProcessor.DitheringMode ditheringMode, Set<UUID> targetPlayerIds) {
         YoutubeDownloadManager downloadManager = plugin.getYoutubeDownloadManager();
-
-        if (acceptConsent && !downloadManager.hasUserConsent()) {
-            downloadManager.saveUserConsent(true);
-            sender.sendMessage(MM.deserialize("<green>✓ Thank you! Downloading yt-dlp..."));
-            sender.sendMessage(MM.deserialize("<gray>This may take a moment. Please wait..."));
-        }
 
         if (!downloadManager.ensureInitialized()) {
             sender.sendMessage(MM.deserialize("<yellow>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
@@ -471,7 +487,8 @@ public class PlayCommand extends ECommand {
             sender.sendMessage(MM.deserialize("<white>  • <gray>From: <gold>https://github.com/yt-dlp/yt-dlp"));
             sender.sendMessage(MM.deserialize(""));
             sender.sendMessage(MM.deserialize("<white>To proceed, run:"));
-            sender.sendMessage(MM.deserialize("<click:suggest_command:/mcc play " + screen.getName() + " " + sourceUrl + " --accept><gold><bold>[CLICK HERE]</bold></gold></click> <gray>or type: <white>/mcc play " + screen.getName() + " " + sourceUrl + " --accept"));
+            sender.sendMessage(MM.deserialize("<click:suggest_command:/mcc download --accept " + sourceUrl + "><gold><bold>[CLICK HERE]</bold></gold></click> <gray>or type: <white>/mcc download --accept " + sourceUrl));
+            sender.sendMessage(MM.deserialize("<gray>After setup finishes, run your play command again."));
             sender.sendMessage(MM.deserialize("<gray>This is a one-time setup. You won't be asked again."));
             sender.sendMessage(MM.deserialize("<yellow>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
             return;
@@ -501,6 +518,7 @@ public class PlayCommand extends ECommand {
                     LivestreamResolver.Livestream livestream = resolver.resolve(sourceUrl);
 
                     VideoPlayer player = new VideoPlayer(plugin, screen);
+                    player.setTargetPlayerIds(targetPlayerIds);
                     QualityCommand.applyScreenPreset(player, screen);
                     player.getFrameProcessor().setDitheringMode(ditheringMode);
 
@@ -529,12 +547,14 @@ public class PlayCommand extends ECommand {
 
                             player.play();
                             String ditherInfo = "\n<gray>  Dithering: <white>" + formatDitheringMode(ditheringMode);
+                            String viewerInfo = formatViewerInfo(player);
                             sender.sendMessage(MM.deserialize(
                                 "<green>▶ Now playing live: <white>" + livestream.displayName() +
                                 "\n<gray>  On screen: <white>" + screen.getName() +
                                 "\n<gray>  Duration: <red>LIVE" +
                                 "\n<gray>  Frame rate: <white>" + String.format("%.1f", player.getFrameRate()) + " fps" +
                                 ditherInfo +
+                                viewerInfo +
                                 "\n<gray>  Audio: <yellow>Not supported for livestreams"
                             ));
                         }
@@ -555,6 +575,75 @@ public class PlayCommand extends ECommand {
     private boolean isUrl(String source) {
         String lower = source.toLowerCase(Locale.ROOT);
         return lower.startsWith("http://") || lower.startsWith("https://");
+    }
+
+    private boolean isAudioChunkArgument(String value) {
+        String lower = value.toLowerCase(Locale.ROOT);
+        if (lower.equals("single") || lower.equals("0")) {
+            return true;
+        }
+        try {
+            Integer.parseInt(lower);
+            return true;
+        } catch (NumberFormatException ignored) {
+            return false;
+        }
+    }
+
+    private Set<UUID> resolveTargetPlayers(List<String> names, CommandSender sender) {
+        if (names.isEmpty()) {
+            return Set.of();
+        }
+
+        Set<UUID> playerIds = new LinkedHashSet<>();
+        List<String> missing = new ArrayList<>();
+        for (String name : names) {
+            Player player = Bukkit.getPlayerExact(name);
+            if (player == null || !player.isOnline()) {
+                missing.add(name);
+                continue;
+            }
+            playerIds.add(player.getUniqueId());
+        }
+
+        if (!missing.isEmpty()) {
+            sender.sendMessage(MM.deserialize("<red>Unknown or offline player(s): " + String.join(", ", missing)));
+            return null;
+        }
+
+        return playerIds;
+    }
+
+    private Collection<Player> getPlaybackViewers(VideoPlayer player) {
+        return player.hasTargetPlayerLimit() ? player.getPlaybackViewers() : player.getScreen().getViewers();
+    }
+
+    private String formatViewerInfo(VideoPlayer player) {
+        if (!player.hasTargetPlayerLimit()) {
+            return "";
+        }
+        return "\n<gray>  Viewers: <white>" + player.getPlaybackViewers().size() + " selected";
+    }
+
+    private List<String> onlinePlayerNames() {
+        return Bukkit.getOnlinePlayers().stream()
+            .map(Player::getName)
+            .sorted(String.CASE_INSENSITIVE_ORDER)
+            .toList();
+    }
+
+    private List<String> combinedCompletions(List<String> first, List<String> second) {
+        List<String> completions = new ArrayList<>(first.size() + second.size());
+        completions.addAll(first);
+        completions.addAll(second);
+        return completions;
+    }
+
+    private List<String> filterCompletions(String currentArg, List<String> completions) {
+        String lower = currentArg.toLowerCase(Locale.ROOT);
+        return completions.stream()
+            .filter(value -> value.toLowerCase(Locale.ROOT).startsWith(lower))
+            .toList();
     }
 }
 

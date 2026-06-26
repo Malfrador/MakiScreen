@@ -170,8 +170,12 @@ public class PacketDispatcher {
     }
 
     public void dispatchFrame(Screen screen, List<TileUpdate> updates, FrameProcessor.FrameContentStats contentStats, PerformanceMetrics metrics) {
-        Collection<? extends Player> onlinePlayers = Bukkit.getOnlinePlayers();
-        if (onlinePlayers.isEmpty()) {
+        dispatchFrame(screen, updates, contentStats, metrics, screen.getViewers());
+    }
+
+    public void dispatchFrame(Screen screen, List<TileUpdate> updates, FrameProcessor.FrameContentStats contentStats,
+                              PerformanceMetrics metrics, Collection<? extends Player> recipients) {
+        if (recipients.isEmpty()) {
             return;
         }
 
@@ -434,16 +438,16 @@ public class PacketDispatcher {
         int packetsSent = packets.size();
 
         long sendingStart = metrics != null ? System.nanoTime() : 0;
-        for (Player player : onlinePlayers) {
+        for (Player player : recipients) {
             sendPacketsToPlayer(player, packets);
         }
         if (metrics != null) {
             metrics.recordPacketSending(System.nanoTime() - sendingStart);
         }
 
-        int actualPacketCount = useBundlePackets ? onlinePlayers.size() : packetsSent * onlinePlayers.size();
+        int actualPacketCount = useBundlePackets ? recipients.size() : packetsSent * recipients.size();
         totalPacketsSent.addAndGet(actualPacketCount);
-        totalBytesSent.addAndGet((long) bytesSent * onlinePlayers.size());
+        totalBytesSent.addAndGet((long) bytesSent * recipients.size());
 
         lastFramePacketCount.set(packetsSent);
         lastFrameBytesSent.set(bytesSent);
@@ -701,8 +705,11 @@ public class PacketDispatcher {
     }
 
     public void dispatchFullFrame(Screen screen, byte[][] mapData) {
-        Collection<? extends Player> onlinePlayers = Bukkit.getOnlinePlayers();
-        if (onlinePlayers.isEmpty()) {
+        dispatchFullFrame(screen, mapData, screen.getViewers());
+    }
+
+    public void dispatchFullFrame(Screen screen, byte[][] mapData, Collection<? extends Player> recipients) {
+        if (recipients.isEmpty()) {
             return;
         }
 
@@ -717,7 +724,7 @@ public class PacketDispatcher {
             packets.add(packet);
         }
 
-        for (Player player : onlinePlayers) {
+        for (Player player : recipients) {
             sendPacketsToPlayer(player, packets);
         }
     }

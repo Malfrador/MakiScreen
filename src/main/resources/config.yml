@@ -1,5 +1,10 @@
 # Version 2.0.0
 
+display:
+  # Color used when a screen is blanked after creation or video completion.
+  # Supports names (WHITE, BLACK, GRAY, TRANSPARENT), hex (#FFFFFF), or map bytes (34).
+  blank-color: WHITE
+
 # YouTube Download Settings
 youtube:
   # Whether to require user consent before downloading yt-dlp

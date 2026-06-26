@@ -8,14 +8,20 @@ import net.kyori.adventure.text.minimessage.MiniMessage;
 import org.bytedeco.javacv.FFmpegFrameGrabber;
 import org.bytedeco.javacv.Frame;
 import org.bytedeco.javacv.Java2DFrameConverter;
+import org.bukkit.Bukkit;
+import org.bukkit.entity.Player;
 
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
 import java.io.File;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.Collection;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Queue;
 import java.util.Set;
 import java.util.UUID;
@@ -65,6 +71,7 @@ public class VideoPlayer {
 
     private Consumer<VideoPlayer> onComplete;
     private Consumer<VideoPlayer> onStateChange;
+    private Set<UUID> targetPlayerIds;
 
     private AudioManager audioManager;
     private long playbackStartTime;
@@ -118,6 +125,50 @@ public class VideoPlayer {
 
     public void setAudioManager(AudioManager audioManager) {
         this.audioManager = audioManager;
+        if (audioManager != null && hasTargetPlayerLimit()) {
+            audioManager.setTargetPlayerIds(targetPlayerIds);
+        }
+    }
+
+    public void setTargetPlayerIds(Collection<UUID> targetPlayerIds) {
+        if (targetPlayerIds == null || targetPlayerIds.isEmpty()) {
+            this.targetPlayerIds = null;
+            return;
+        }
+        this.targetPlayerIds = new LinkedHashSet<>(targetPlayerIds);
+        if (audioManager != null) {
+            audioManager.setTargetPlayerIds(this.targetPlayerIds);
+        }
+    }
+
+    public boolean hasTargetPlayerLimit() {
+        return targetPlayerIds != null && !targetPlayerIds.isEmpty();
+    }
+
+    public boolean canSendTo(Player player) {
+        return !hasTargetPlayerLimit() || targetPlayerIds.contains(player.getUniqueId());
+    }
+
+    public Collection<Player> getPlaybackViewers() {
+        if (!hasTargetPlayerLimit()) {
+            return screen.getViewers();
+        }
+
+        List<Player> players = new ArrayList<>(targetPlayerIds.size());
+        for (UUID playerId : targetPlayerIds) {
+            Player player = Bukkit.getPlayer(playerId);
+            if (player != null && player.isOnline()) {
+                players.add(player);
+            }
+        }
+        return players;
+    }
+
+    private Collection<? extends Player> getPacketRecipients() {
+        if (!hasTargetPlayerLimit()) {
+            return screen.getViewers();
+        }
+        return getPlaybackViewers();
     }
 
     public boolean load(File videoFile) {
@@ -283,6 +334,9 @@ public class VideoPlayer {
             plugin.getLogger().warning("Cannot play: Screen '" + screen.getName() + "' has no valid origin location");
             return;
         }
+
+        screen.updateViewerCache();
+        plugin.getScreenManager().fillScreenWithPlaybackBackground(screen, getPacketRecipients());
 
         state.set(State.PLAYING);
         notifyStateChange();
@@ -532,7 +586,7 @@ public class VideoPlayer {
             );
 
             long dispatchStart = System.nanoTime();
-            packetDispatcher.dispatchFrame(screen, processedFrame.updates(), processedFrame.contentStats(), performanceMetrics);
+            packetDispatcher.dispatchFrame(screen, processedFrame.updates(), processedFrame.contentStats(), performanceMetrics, getPacketRecipients());
             long dispatchEnd = System.nanoTime();
             performanceMetrics.recordPacketDispatch(dispatchEnd - dispatchStart);
             framesProcessed.incrementAndGet();
@@ -666,7 +720,7 @@ public class VideoPlayer {
 
     private void onVideoComplete() {
         stop();
-        plugin.getScreenManager().fillScreenWithColor(screen, (byte) 34);
+        plugin.getScreenManager().fillScreenWithBlankColor(screen);
         plugin.getLogger().info("Video playback complete");
         if (onComplete != null) {
             onComplete.accept(this);

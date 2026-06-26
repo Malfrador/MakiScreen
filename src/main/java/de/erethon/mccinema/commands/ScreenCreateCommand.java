@@ -4,6 +4,7 @@ import de.erethon.mccinema.MCCinema;
 import de.erethon.mccinema.screen.AspectRatio;
 import de.erethon.mccinema.screen.MapTile;
 import de.erethon.mccinema.screen.Screen;
+import de.erethon.mccinema.screen.ScreenMapRenderer;
 import de.erethon.bedrock.command.ECommand;
 import net.kyori.adventure.text.minimessage.MiniMessage;
 import org.bukkit.Location;
@@ -99,8 +100,7 @@ public class ScreenCreateCommand extends ECommand {
 
         plugin.getScreenManager().saveScreens();
 
-        // broken, might be too early
-        plugin.getScreenManager().fillScreenWithColor(screen, (byte) 34);
+        plugin.getScreenManager().fillScreenWithBlankColor(screen);
 
         int totalMaps = screen.getTotalMaps();
         int pixelWidth = screen.getPixelWidth();
@@ -138,6 +138,7 @@ public class ScreenCreateCommand extends ECommand {
                 int tileIndex = (screen.getMapHeight() - 1 - y) * screen.getMapWidth() + x;
                 MapTile tile = new MapTile(mapView.getId(), x, screen.getMapHeight() - 1 - y, tileIndex);
                 screen.addTile(tile);
+                mapView.addRenderer(new ScreenMapRenderer(tile));
 
                 maps.add(mapItem);
             }

@@ -322,15 +322,19 @@ public class YoutubeDownloadManager {
                 if (!platform.startsWith("windows")) {
                     ffmpegExe.setExecutable(true);
                 }
-                ffmpegPath = ffmpegExe.getAbsolutePath();
-                plugin.getLogger().info("Using ffmpeg from JavaCV: " + ffmpegPath);
-                return;
+                String candidatePath = ffmpegExe.getAbsolutePath();
+                if (testCommand(candidatePath, "-version")) {
+                    ffmpegPath = candidatePath;
+                    plugin.getLogger().info("Using ffmpeg from JavaCV: " + ffmpegPath);
+                    return;
+                }
+                plugin.getLogger().warning("Bundled JavaCV ffmpeg was found but could not be executed: " + candidatePath);
             }
         } catch (Throwable t) {
             plugin.getLogger().warning("Could not load ffmpeg from JavaCV: " + t.getClass().getSimpleName() + ": " + t.getMessage());
         }
 
-        // If JavaCV's ffmpeg fails, try system PATH as fallback
+        // If JavaCV's ffmpeg is unavailable or unusable, try system PATH as fallback.
         if (testCommand("ffmpeg", "-version")) {
             ffmpegPath = "ffmpeg";
             plugin.getLogger().info("Using system ffmpeg from PATH (fallback)");
@@ -467,9 +471,10 @@ public class YoutubeDownloadManager {
                     command.add("--js-runtimes");
                     command.add(jsRuntimePath);
                 }
-                if (ffmpegPath != null) {
+                String ytDlpFfmpegLocation = getYtDlpFfmpegLocation();
+                if (ytDlpFfmpegLocation != null) {
                     command.add("--ffmpeg-location");
-                    command.add(ffmpegPath);
+                    command.add(ytDlpFfmpegLocation);
                 }
                 command.add("-f");
                 command.add("bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best");
@@ -542,7 +547,7 @@ public class YoutubeDownloadManager {
                         callback.onComplete(finalFile);
                     }
                 } else {
-                    String errorMsg = errorOutput.length() > 0 ? errorOutput.toString() : "yt-dlp exited with code: " + exitCode;
+                    String errorMsg = !errorOutput.isEmpty() ? errorOutput.toString() : "yt-dlp exited with code: " + exitCode;
                     throw new Exception(errorMsg);
                 }
 
@@ -559,6 +564,20 @@ public class YoutubeDownloadManager {
         });
 
         return task;
+    }
+
+    private String getYtDlpFfmpegLocation() {
+        if (ffmpegPath == null) {
+            return null;
+        }
+
+        File ffmpegFile = new File(ffmpegPath);
+        if (!ffmpegFile.isAbsolute()) {
+            return null;
+        }
+
+        File parent = ffmpegFile.getParentFile();
+        return parent != null ? parent.getAbsolutePath() : ffmpegPath;
     }
 
     /**

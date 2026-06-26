@@ -4,11 +4,16 @@ import de.erethon.mccinema.MCCinema;
 import de.erethon.mccinema.video.PacketDispatcher;
 import org.bukkit.Bukkit;
 import org.bukkit.World;
+import org.bukkit.craftbukkit.CraftWorld;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.entity.Player;
+import net.minecraft.world.level.saveddata.maps.MapId;
+import net.minecraft.world.level.saveddata.maps.MapItemSavedData;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Map;
 import java.util.Optional;
@@ -121,23 +126,96 @@ public class ScreenManager {
         saveScreens();
     }
 
+    public byte getBlankColorByte() {
+        String configured = plugin.getConfig().getString("display.blank-color", "WHITE");
+        Optional<Byte> parsed = MapColorUtil.parseMapColor(configured);
+        if (parsed.isPresent()) {
+            return parsed.get();
+        }
+
+        plugin.getLogger().warning("Invalid display.blank-color '" + configured + "', using WHITE.");
+        return MapColorUtil.DEFAULT_BLANK_COLOR;
+    }
+
+    public void fillScreenWithBlankColor(Screen screen) {
+        fillScreenWithColor(screen, getBlankColorByte());
+    }
+
+    public void fillScreenWithPlaybackBackground(Screen screen, Collection<? extends Player> recipients) {
+        fillScreenWithColor(screen, MapColorUtil.visibleBlack(), recipients, false);
+    }
+
     /**
-     * Fills a screen with a specific color and sends the update to all online players.
+     * Fills a screen with a specific color and sends the update to nearby viewers.
      * @param screen The screen to fill
      * @param colorByte The Minecraft map color byte (e.g., (byte) 34 for white)
      */
     public void fillScreenWithColor(Screen screen, byte colorByte) {
+        fillScreenWithColor(screen, colorByte, null, true);
+    }
+
+    private void fillScreenWithColor(Screen screen, byte colorByte, Collection<? extends Player> recipients, boolean scheduleResends) {
         screen.fillWithColor(colorByte);
+        byte[][] mapData = createFillFrame(screen, colorByte);
+        writeColorToServerMapData(screen, colorByte);
+        if (screen.hasValidOrigin()) {
+            screen.updateViewerCache();
+        }
+        PacketDispatcher dispatcher =
+            new PacketDispatcher(plugin);
+        if (recipients == null) {
+            dispatcher.dispatchFullFrame(screen, mapData);
+        } else {
+            dispatcher.dispatchFullFrame(screen, mapData, recipients);
+        }
+        if (scheduleResends) {
+            scheduleFullFrameDispatch(screen, 5L);
+            scheduleFullFrameDispatch(screen, 20L);
+            scheduleFullFrameDispatch(screen, 60L);
+        }
+    }
+
+    private byte[][] createFillFrame(Screen screen, byte colorByte) {
         byte[][] mapData = new byte[screen.getTotalMaps()][];
         byte[] fillData = new byte[Screen.MAP_SIZE * Screen.MAP_SIZE];
-        java.util.Arrays.fill(fillData, colorByte);
+        Arrays.fill(fillData, colorByte);
 
         for (int i = 0; i < screen.getTotalMaps(); i++) {
             mapData[i] = fillData;
         }
-        PacketDispatcher dispatcher =
-            new PacketDispatcher(plugin);
-        dispatcher.dispatchFullFrame(screen, mapData);
+        return mapData;
+    }
+
+    private void scheduleFullFrameDispatch(Screen screen, long delayTicks) {
+        Bukkit.getScheduler().runTaskLater(plugin, () -> {
+            if (screen.hasValidOrigin()) {
+                screen.updateViewerCache();
+            }
+            PacketDispatcher dispatcher = new PacketDispatcher(plugin);
+            for (org.bukkit.entity.Player player : screen.getViewers()) {
+                dispatcher.sendLastFrameToPlayer(player, screen);
+            }
+        }, delayTicks);
+    }
+
+    private void writeColorToServerMapData(Screen screen, byte colorByte) {
+        World world = screen.getOrigin() != null ? screen.getOrigin().getWorld() : null;
+        if (!(world instanceof CraftWorld craftWorld)) {
+            return;
+        }
+
+        for (MapTile tile : screen.getTiles()) {
+            MapItemSavedData mapData = craftWorld.getHandle().getMapData(new MapId(tile.getMapId()));
+            if (mapData == null) {
+                continue;
+            }
+
+            for (int y = 0; y < Screen.MAP_SIZE; y++) {
+                for (int x = 0; x < Screen.MAP_SIZE; x++) {
+                    mapData.setColor(x, y, colorByte);
+                }
+            }
+        }
     }
 }
 

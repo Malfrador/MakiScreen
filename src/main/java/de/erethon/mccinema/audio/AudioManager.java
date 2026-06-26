@@ -2,6 +2,7 @@ package de.erethon.mccinema.audio;
 
 import de.erethon.mccinema.MCCinema;
 import de.erethon.mccinema.screen.Screen;
+import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.SoundCategory;
 import org.bukkit.entity.Player;
@@ -24,8 +25,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.ZipEntry;
@@ -43,6 +48,7 @@ public class AudioManager {
     private final List<AudioChunk> chunks = new ArrayList<>();
     private final int chunkDurationMs; // 0 = single file mode
     private final boolean positionalAudio; // broken right now
+    private Set<UUID> targetPlayerIds;
 
     private final AtomicInteger currentChunkIndex = new AtomicInteger(-1);
     private final AtomicBoolean isPlaying = new AtomicBoolean(false);
@@ -79,6 +85,14 @@ public class AudioManager {
 
     public String getVideoId() {
         return videoId;
+    }
+
+    public void setTargetPlayerIds(Collection<UUID> targetPlayerIds) {
+        if (targetPlayerIds == null || targetPlayerIds.isEmpty()) {
+            this.targetPlayerIds = null;
+            return;
+        }
+        this.targetPlayerIds = new LinkedHashSet<>(targetPlayerIds);
     }
 
     public boolean extractAndSplitAudio(File videoFile) {
@@ -663,7 +677,7 @@ public class AudioManager {
 
         AudioChunk chunk = chunks.get(index);
         String key = SOUND_NAMESPACE + ":" + videoId + ".chunk_" + chunk.index();
-        for (Player player : screen.getViewers()) {
+        for (Player player : getAudioRecipients()) {
             player.playSound(location, key, SoundCategory.RECORDS, 1.0f, 1.0f);
         }
     }
@@ -672,10 +686,25 @@ public class AudioManager {
         for (int i = 0; i < chunks.size(); i++) {
             String key = SOUND_NAMESPACE + ":" + videoId + ".chunk_" + i;
 
-            for (Player player : screen.getViewers()) {
+            for (Player player : getAudioRecipients()) {
                 player.stopSound(key);
             }
         }
+    }
+
+    private Collection<Player> getAudioRecipients() {
+        if (targetPlayerIds == null || targetPlayerIds.isEmpty()) {
+            return screen.getViewers();
+        }
+
+        List<Player> players = new ArrayList<>(targetPlayerIds.size());
+        for (UUID playerId : targetPlayerIds) {
+            Player player = Bukkit.getPlayer(playerId);
+            if (player != null && player.isOnline()) {
+                players.add(player);
+            }
+        }
+        return players;
     }
 
     private void scheduleNextChunks(Location location) {
