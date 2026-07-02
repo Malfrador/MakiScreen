@@ -28,6 +28,7 @@ public class MCommandCache extends ECommandCache {
         // Debug
         addCommand(new DebugCommand());
         addCommand(new QualityCommand());
+        addCommand(new ReloadCommand());
 
         // Help
         addCommand(new HelpCommand());

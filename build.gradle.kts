@@ -111,6 +111,10 @@ tasks {
                 description = "Allows viewing screen info"
                 default = BukkitPluginDescription.Permission.Default.TRUE
             }
+            register("mccinema.reload") {
+                description = "Allows reloading MCCinema config"
+                default = BukkitPluginDescription.Permission.Default.OP
+            }
             register("mccinema.help") {
                 description = "Allows viewing help"
                 default = BukkitPluginDescription.Permission.Default.TRUE

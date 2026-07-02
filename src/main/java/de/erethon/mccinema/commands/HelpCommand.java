@@ -38,6 +38,7 @@ public class HelpCommand extends ECommand {
               <white>/mcc resume <screen></white> <gray>- Resume playback
               <white>/mcc stop <screen></white> <gray>- Stop playback
               <white>/mcc seek <screen> <time></white> <gray>- Seek to time (MM:SS)
+              <white>/mcc reload</white> <gray>- Reload the config
             
             <yellow>Aspect Ratios:</yellow>
               <gray>16:9, 21:9 (CinemaScope), 4:3, 1:1, 2:1, CUSTOM
