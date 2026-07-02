@@ -15,6 +15,7 @@ import java.io.File;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -155,6 +156,12 @@ public class ScreenManager {
     }
 
     private void fillScreenWithColor(Screen screen, byte colorByte, Collection<? extends Player> recipients, boolean scheduleResends) {
+        if (!Bukkit.isPrimaryThread()) {
+            Collection<? extends Player> recipientSnapshot = recipients == null ? null : List.copyOf(recipients);
+            Bukkit.getScheduler().runTask(plugin, () -> fillScreenWithColor(screen, colorByte, recipientSnapshot, scheduleResends));
+            return;
+        }
+
         screen.fillWithColor(colorByte);
         byte[][] mapData = createFillFrame(screen, colorByte);
         writeColorToServerMapData(screen, colorByte);
