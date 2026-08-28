@@ -15,7 +15,7 @@ plugins {
 }
 
 group = "cat.maki.makiscreen"
-version = "2.3.3"
+version = "2.4.0"
 
 java {
     toolchain.languageVersion.set(JavaLanguageVersion.of(25))
@@ -99,8 +99,16 @@ tasks {
                 description = "Allows pause/resume/stop/seek"
                 default = BukkitPluginDescription.Permission.Default.OP
             }
+            register("mccinema.crop") {
+                description = "Allows editing persisted video crop settings"
+                default = BukkitPluginDescription.Permission.Default.OP
+            }
             register("mccinema.download") {
                 description = "Allows downloading videos from YouTube"
+                default = BukkitPluginDescription.Permission.Default.OP
+            }
+            register("mccinema.media") {
+                description = "Allows viewing and retrying media tool diagnostics"
                 default = BukkitPluginDescription.Permission.Default.OP
             }
             register("mccinema.list") {

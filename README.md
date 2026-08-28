@@ -22,10 +22,13 @@ _All commands have helpful tab-completion available_
     * Alternatively, it can automatically host a resourcepack server if audio is enabled. On some hosts this may fail.
     * To allow for resuming and pausing of playback, audio data is split into chunks of `<chunk size>` seconds in length. The default value of 10s is usually good.
 4) You can use `/mcc quality <screen> <performance/balanced/quality>` to change playback quality settings. This will have a significant effect on bandwidth and CPU usage.
+5) Use `/mcc crop <screen>` while a local video is playing to adjust its viewport. Scroll to zoom, use W/A/S/D to pan, and hold sneak for precise adjustments. The saved crop is reused whenever that video is played again.
 
 To download videos from YouTube, run `/mcc download`.
-There is some first-time setup required for this. You will be asked to confirm the yt-dlp download. Due to YTs anti-bot measures, you also may need to install a JS runtime on your machine for yt-dlp to work properly.
+On first use, MCCinema asks for permission to install its private, self-contained yt-dlp and Deno tools. The requested download or livestream continues automatically after setup; no system Python, Node.js, or ffmpeg installation is required. Administrators can inspect or retry the media toolchain with `/mcc media`.
 But of course you can also always download YouTube videos manually and place them in /videos/ yourself!
+
+YouTube cookies are optional and should only be used for media that requires an account. Export a fresh private/incognito YouTube session in Netscape format to `plugins/MCCinema/youtube_cookies.txt`, then close that private session so YouTube does not rotate it. MCCinema validates the file and only retries with it after an authentication-specific failure; no reload is needed. Using an account with third-party downloaders can cause YouTube to restrict it, so avoid a primary account.
 
 ---
 

@@ -6,6 +6,10 @@ import de.erethon.mccinema.download.DownloadTask;
 import de.erethon.mccinema.download.YoutubeDownloadManager;
 import de.erethon.mccinema.download.YoutubeDownloadManager.VideoInfo;
 import de.erethon.bedrock.command.ECommand;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.event.ClickEvent;
+import net.kyori.adventure.text.format.NamedTextColor;
+import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.text.minimessage.MiniMessage;
 import org.bukkit.command.CommandSender;
 import org.bukkit.scheduler.BukkitRunnable;
@@ -52,7 +56,7 @@ public class DownloadCommand extends ECommand {
         for (int i = 1; i < args.length; i++) {
             if (args[i].equalsIgnoreCase("--no-convert")) {
                 convertFps = false;
-            } else if (args[i].equalsIgnoreCase("--accept")) {
+            } else if (args[i].equalsIgnoreCase("--accept") || args[i].equalsIgnoreCase("--accept-tools")) {
                 acceptConsent = true;
             } else if (videoIdOrUrl == null) {
                 videoIdOrUrl = args[i];
@@ -68,47 +72,47 @@ public class DownloadCommand extends ECommand {
 
         YoutubeDownloadManager downloadManager = plugin.getYoutubeDownloadManager();
 
-        // If user accepted consent, save it and initialize
-        if (acceptConsent && !downloadManager.hasUserConsent()) {
+        if (acceptConsent) {
             downloadManager.saveUserConsent(true);
-            sender.sendMessage(MM.deserialize("<green>✓ Thank you! Downloading yt-dlp..."));
-            sender.sendMessage(MM.deserialize("<gray>This may take a moment. Please wait..."));
-
-            // Try to initialize now
-            if (!downloadManager.ensureInitialized()) {
-                sender.sendMessage(MM.deserialize("<red>Failed to start yt-dlp initialization. Please try again."));
-                return;
-            }
-
-            // Wait a moment for initialization to start
-            sender.sendMessage(MM.deserialize("<yellow>Initializing yt-dlp... Your download will start automatically once ready."));
         }
 
-        // Check if yt-dlp needs to be initialized
-        if (!downloadManager.ensureInitialized()) {
+        if (!downloadManager.hasUserConsent()) {
             sender.sendMessage(MM.deserialize("<yellow>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
-            sender.sendMessage(MM.deserialize("<gold><bold>YouTube Download - First Time Setup"));
-            sender.sendMessage(MM.deserialize(""));
-            sender.sendMessage(MM.deserialize("<white>To download YouTube videos, MCCinema needs to download <gold>yt-dlp</gold>,"));
-            sender.sendMessage(MM.deserialize("<white>a free and open-source YouTube downloader."));
-            sender.sendMessage(MM.deserialize(""));
-            sender.sendMessage(MM.deserialize("<gray>What will be downloaded:"));
-            sender.sendMessage(MM.deserialize("<white>  • <gray>yt-dlp binary (<gold>~10MB</gold>)"));
-            sender.sendMessage(MM.deserialize("<white>  • <gray>From: <gold>https://github.com/yt-dlp/yt-dlp"));
-            sender.sendMessage(MM.deserialize(""));
-            sender.sendMessage(MM.deserialize("<white>To proceed with the download, please run:"));
-            sender.sendMessage(MM.deserialize("<click:suggest_command:/mcc download --accept " + videoIdOrUrl + (customName != null ? " " + customName : "") + (convertFps ? "" : " --no-convert") + "><gold><bold>[CLICK HERE]</bold></gold></click> <gray>or type: <white>/mcc download --accept " + videoIdOrUrl));
-            sender.sendMessage(MM.deserialize(""));
-            sender.sendMessage(MM.deserialize("<gray>This is a one-time setup. You won't be asked again."));
+            sender.sendMessage(MM.deserialize("<gold><bold>One-time media setup"));
+            sender.sendMessage(MM.deserialize("<gray>MCCinema will download verified, self-contained yt-dlp and Deno tools from their official GitHub releases."));
+            String command = "/mcc download --accept-tools " + videoIdOrUrl +
+                (customName != null ? " " + customName : "") + (convertFps ? "" : " --no-convert");
+            sender.sendMessage(Component.text("[INSTALL AND CONTINUE]", NamedTextColor.GREEN, TextDecoration.BOLD)
+                .clickEvent(ClickEvent.runCommand(command)));
+            sender.sendMessage(MM.deserialize("<gray>Console: <white>" + escape(command)));
             sender.sendMessage(MM.deserialize("<yellow>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
             return;
         }
 
-        if (!downloadManager.isReady()) {
-            sender.sendMessage(MM.deserialize("<yellow>yt-dlp is still initializing... Please wait a moment and try again."));
+        final String requestedUrl = videoIdOrUrl;
+        final String requestedName = customName;
+        final boolean requestedConversion = convertFps;
+        if (downloadManager.isReady()) {
+            startDownload(sender, downloadManager, requestedUrl, requestedName, requestedConversion);
             return;
         }
 
+        sender.sendMessage(MM.deserialize("<yellow>Preparing media support... Your download will start automatically."));
+        downloadManager.initializeAsync().whenComplete((ignored, error) ->
+            plugin.getServer().getScheduler().runTask(plugin, () -> {
+                if (error != null) {
+                    sender.sendMessage(MM.deserialize("<red>Media setup failed. <gray>" +
+                        escape(downloadManager.userMessage(error))));
+                    downloadManager.logYtDlpFailure("initialize media support", requestedUrl, error);
+                    return;
+                }
+                startDownload(sender, downloadManager, requestedUrl, requestedName, requestedConversion);
+            })
+        );
+    }
+
+    private void startDownload(CommandSender sender, YoutubeDownloadManager downloadManager, String videoIdOrUrl,
+                               String customName, boolean convertFps) {
         sender.sendMessage(MM.deserialize("<yellow>Fetching video information..."));
 
         // Start the download
@@ -167,42 +171,7 @@ public class DownloadCommand extends ECommand {
                     @Override
                     public void run() {
                         sender.sendMessage(MM.deserialize("<red>✗ Download failed!"));
-
-                        String errorMsg = error.getMessage();
-                        if (errorMsg != null) {
-                            if (errorMsg.contains("requires authentication") || errorMsg.contains("cookies are required") ||
-                                errorMsg.contains("Sign in") || errorMsg.contains("login")) {
-                                sender.sendMessage(MM.deserialize("<yellow>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
-                                sender.sendMessage(MM.deserialize("<red>YouTube requires authentication!"));
-                                sender.sendMessage(MM.deserialize(""));
-                                sender.sendMessage(MM.deserialize("<yellow>Setup instructions:"));
-                                sender.sendMessage(MM.deserialize("<white>1. <gray>Install browser extension: <white>'Get cookies.txt LOCALLY'"));
-                                sender.sendMessage(MM.deserialize("<white>2. <gray>Go to <white>youtube.com <gray>and log in"));
-                                sender.sendMessage(MM.deserialize("<white>3. <gray>Click the extension and export cookies"));
-                                sender.sendMessage(MM.deserialize("<white>4. <gray>Save as: <white>youtube_cookies.txt"));
-                                sender.sendMessage(MM.deserialize("<white>5. <gray>Place in: <white>" + plugin.getDataFolder().getAbsolutePath()));
-                                sender.sendMessage(MM.deserialize("<white>6. <gray>Restart server or run: <white>/reload"));
-                                sender.sendMessage(MM.deserialize(""));
-                                sender.sendMessage(MM.deserialize("<gray>Chrome: <white>https://chromewebstore.google.com/detail/cclelndahbckbenkjhflpdbgdldlbecc"));
-                                sender.sendMessage(MM.deserialize("<gray>Firefox: <white>https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/"));
-                                sender.sendMessage(MM.deserialize("<yellow>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
-                            } else if (errorMsg.contains("Signature solving failed") || errorMsg.contains("n challenge solving failed")) {
-                                sender.sendMessage(MM.deserialize("<yellow>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
-                                sender.sendMessage(MM.deserialize("<red>YouTube signature decryption issue detected!"));
-                                sender.sendMessage(MM.deserialize(""));
-                                sender.sendMessage(MM.deserialize("<yellow>This has been automatically handled. If you still see this error:"));
-                                sender.sendMessage(MM.deserialize("<white>1. <gray>Update yt-dlp: Delete <white>yt-dlp.exe <gray>and restart server"));
-                                sender.sendMessage(MM.deserialize("<white>2. <gray>Add YouTube cookies (optional but helps):"));
-                                sender.sendMessage(MM.deserialize("   <gray>- Export cookies from browser using 'Get cookies.txt LOCALLY'"));
-                                sender.sendMessage(MM.deserialize("   <gray>- Save as: <white>youtube_cookies.txt"));
-                                sender.sendMessage(MM.deserialize("   <gray>- Place in: <white>" + plugin.getDataFolder().getAbsolutePath()));
-                                sender.sendMessage(MM.deserialize("<yellow>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
-                            } else if (errorMsg.contains("not ready")) {
-                                sender.sendMessage(MM.deserialize("<gray>yt-dlp is still initializing. Please wait and try again."));
-                            } else {
-                                sender.sendMessage(MM.deserialize("<gray>Error: " + errorMsg));
-                            }
-                        }
+                        sender.sendMessage(MM.deserialize("<gray>" + escape(downloadManager.userMessage(error))));
                     }
                 }.runTask(plugin);
             }
@@ -218,8 +187,8 @@ public class DownloadCommand extends ECommand {
                         @Override
                         public void run() {
                             sender.sendMessage(MM.deserialize("<gray>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
-                            sender.sendMessage(MM.deserialize("<yellow>Video: <white>" + info.title));
-                            sender.sendMessage(MM.deserialize("<yellow>Author: <white>" + info.uploader));
+                            sender.sendMessage(MM.deserialize("<yellow>Video: <white>" + escape(info.title)));
+                            sender.sendMessage(MM.deserialize("<yellow>Author: <white>" + escape(info.uploader)));
                             sender.sendMessage(MM.deserialize("<yellow>Duration: <white>" + formatDuration(info.duration)));
                             sender.sendMessage(MM.deserialize("<gray>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
                             sender.sendMessage(MM.deserialize("<yellow>Starting download..."));
@@ -245,5 +214,9 @@ public class DownloadCommand extends ECommand {
         } else {
             return String.format("%ds", secs);
         }
+    }
+
+    private static String escape(String value) {
+        return MM.escapeTags(value == null ? "Unknown media error" : value);
     }
 }

@@ -21,9 +21,11 @@ public class MCommandCache extends ECommandCache {
         addCommand(new ResumeCommand());
         addCommand(new StopCommand());
         addCommand(new SeekCommand());
+        addCommand(new CropCommand());
 
         // Download
         addCommand(new DownloadCommand());
+        addCommand(new MediaCommand());
 
         // Debug
         addCommand(new DebugCommand());

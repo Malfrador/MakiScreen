@@ -8,6 +8,8 @@ import de.erethon.mccinema.screen.Screen;
 import de.erethon.mccinema.screen.ScreenManager;
 import de.erethon.mccinema.video.PacketDispatcher;
 import de.erethon.mccinema.video.VideoPlayer;
+import de.erethon.mccinema.video.VideoTransformEditor;
+import de.erethon.mccinema.video.VideoTransformManager;
 import de.erethon.bedrock.compatibility.Internals;
 import de.erethon.bedrock.plugin.EPlugin;
 import de.erethon.bedrock.plugin.EPluginSettings;
@@ -36,6 +38,8 @@ public final class MCCinema extends EPlugin implements Listener {
     private ResourcePackManager resourcePackManager;
     private YoutubeDownloadManager youtubeDownloadManager;
     private ResourcePackListener resourcePackListener;
+    private VideoTransformManager videoTransformManager;
+    private VideoTransformEditor videoTransformEditor;
     private final Map<UUID, VideoPlayer> videoPlayers = new ConcurrentHashMap<>();
 
     public MCCinema() {
@@ -74,6 +78,7 @@ public final class MCCinema extends EPlugin implements Listener {
 
         screenManager = new ScreenManager(this);
         screenManager.loadScreens();
+        videoTransformManager = new VideoTransformManager(this);
 
         youtubeDownloadManager = new YoutubeDownloadManager(this);
 
@@ -111,6 +116,8 @@ public final class MCCinema extends EPlugin implements Listener {
         getServer().getPluginManager().registerEvents(this, this);
         resourcePackListener = new ResourcePackListener(this);
         getServer().getPluginManager().registerEvents(resourcePackListener, this);
+        videoTransformEditor = new VideoTransformEditor(this);
+        getServer().getPluginManager().registerEvents(videoTransformEditor, this);
         logger.info("MCCinema enabled!");
         logger.info("  Screens loaded: " + screenManager.getAllScreens().size());
     }
@@ -126,6 +133,9 @@ public final class MCCinema extends EPlugin implements Listener {
 
     @Override
     public void onDisable() {
+        if (videoTransformEditor != null) {
+            videoTransformEditor.shutdown();
+        }
         for (VideoPlayer player : videoPlayers.values()) {
             player.shutdown();
         }
@@ -181,6 +191,14 @@ public final class MCCinema extends EPlugin implements Listener {
 
     public YoutubeDownloadManager getYoutubeDownloadManager() {
         return youtubeDownloadManager;
+    }
+
+    public VideoTransformManager getVideoTransformManager() {
+        return videoTransformManager;
+    }
+
+    public VideoTransformEditor getVideoTransformEditor() {
+        return videoTransformEditor;
     }
 
     public void registerVideoPlayer(Screen screen, VideoPlayer player) {

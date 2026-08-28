@@ -139,6 +139,7 @@ public class ScreenCreateCommand extends ECommand {
                 MapTile tile = new MapTile(mapView.getId(), x, screen.getMapHeight() - 1 - y, tileIndex);
                 screen.addTile(tile);
                 mapView.addRenderer(new ScreenMapRenderer(tile));
+                plugin.getScreenManager().tagScreenMap(mapItem, screen, tile);
 
                 maps.add(mapItem);
             }
@@ -152,6 +153,7 @@ public class ScreenCreateCommand extends ECommand {
                     .getRelative(BlockFace.UP, y);
 
                 Location frameLoc = targetBlock.getRelative(facing.getOppositeFace()).getLocation();
+                MapTile tile = screen.getTile(mapIndex);
 
                 try {
                     ItemFrame frame = player.getWorld().spawn(frameLoc, ItemFrame.class, f -> {
@@ -160,6 +162,7 @@ public class ScreenCreateCommand extends ECommand {
                         f.setFixed(true);
                         f.setVisible(false);
                         f.setInvulnerable(true);
+                        plugin.getScreenManager().tagScreenFrame(f, screen, tile);
                     });
 
                     frame.setItem(maps.get(mapIndex), false);

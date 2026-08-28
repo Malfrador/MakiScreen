@@ -7,8 +7,21 @@ display:
 
 # YouTube Download Settings
 youtube:
-  # Whether to require user consent before downloading yt-dlp
+  # Whether to require one-time consent before downloading the self-contained
+  # yt-dlp and Deno media tools into the plugin data directory.
   require-consent: true
+
+  tools:
+    # stable or nightly. Stable changes less often; nightly receives site fixes sooner.
+    yt-dlp-channel: stable
+
+    # Refresh a working yt-dlp installation after this many days.
+    # Failed updates keep using the last verified working version. 0 disables refreshes.
+    update-interval-days: 7
+
+  # Optional authentication is read from youtube_cookies.txt in the plugin directory.
+  # Public media is always tried anonymously first. Cookies are only used when the
+  # provider explicitly requires authentication and the file passes format validation.
 
   # Auto-convert downloaded videos to 20 FPS by default
   # Can be overridden with --no-convert flag

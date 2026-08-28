@@ -196,6 +196,11 @@ public class FrameProcessor {
     }
     
     public ProcessedFrame processFrame(BufferedImage sourceImage, int targetWidth, int targetHeight, PerformanceMetrics metrics) {
+        return processFrame(sourceImage, targetWidth, targetHeight, metrics, VideoTransform.DEFAULT);
+    }
+
+    public ProcessedFrame processFrame(BufferedImage sourceImage, int targetWidth, int targetHeight,
+                                       PerformanceMetrics metrics, VideoTransform transform) {
         int sourceWidth = sourceImage.getWidth();
         int sourceHeight = sourceImage.getHeight();
         byte[] sourceFrameData = extractFrameData(sourceImage, sourceWidth, sourceHeight);
@@ -204,7 +209,8 @@ public class FrameProcessor {
         lastFrameContentStats = contentStats;
         lastAdaptiveProfile = adaptiveProfile;
 
-        boolean needsResize = sourceWidth != targetWidth || sourceHeight != targetHeight;
+        VideoTransform effectiveTransform = transform == null ? VideoTransform.DEFAULT : transform;
+        boolean needsResize = sourceWidth != targetWidth || sourceHeight != targetHeight || !effectiveTransform.isDefault();
 
         if (needsResize) {
             ensureSourceBuffers(sourceWidth, sourceHeight);
@@ -233,7 +239,7 @@ public class FrameProcessor {
             // Fit palette indices into the screen and fill bars directly with palette black.
             long upscaleStart = metrics != null ? System.nanoTime() : 0;
             byte[] upscaled = fitPaletteIndices(
-                ditheredFrameData, sourceWidth, sourceHeight, targetWidth, targetHeight
+                ditheredFrameData, sourceWidth, sourceHeight, targetWidth, targetHeight, effectiveTransform
             );
             if (metrics != null) {
                 metrics.recordUpscaling(System.nanoTime() - upscaleStart);
@@ -555,7 +561,10 @@ public class FrameProcessor {
     }
 
     private byte[] fitPaletteIndices(byte[] sourceIndices, int sourceWidth, int sourceHeight,
-                                     int targetWidth, int targetHeight) {
+                                     int targetWidth, int targetHeight, VideoTransform transform) {
+        if (!transform.isDefault()) {
+            return renderViewport(sourceIndices, sourceWidth, sourceHeight, targetWidth, targetHeight, transform);
+        }
         double scale = Math.min(
             (double) targetWidth / sourceWidth,
             (double) targetHeight / sourceHeight
@@ -581,6 +590,83 @@ public class FrameProcessor {
             );
         }
         return result;
+    }
+
+    private byte[] renderViewport(byte[] sourceIndices, int sourceWidth, int sourceHeight,
+                                  int targetWidth, int targetHeight, VideoTransform transform) {
+        byte[] result = new byte[targetWidth * targetHeight];
+        Arrays.fill(result, getColor(0));
+
+        double containScale = Math.min(
+            (double) targetWidth / sourceWidth,
+            (double) targetHeight / sourceHeight
+        );
+        double scale = containScale * transform.zoom();
+        int renderedWidth = Math.max(1, (int) Math.round(sourceWidth * scale));
+        int renderedHeight = Math.max(1, (int) Math.round(sourceHeight * scale));
+        long offsetXLong = Math.round(targetWidth / 2.0 - renderedWidth * transform.focusX());
+        long offsetYLong = Math.round(targetHeight / 2.0 - renderedHeight * transform.focusY());
+        if (offsetXLong >= targetWidth || offsetXLong <= -(long) renderedWidth ||
+            offsetYLong >= targetHeight || offsetYLong <= -(long) renderedHeight) {
+            return result;
+        }
+        int offsetX = (int) offsetXLong;
+        int offsetY = (int) offsetYLong;
+
+        int startX = Math.max(0, offsetX);
+        int endX = Math.min(targetWidth, offsetX + renderedWidth);
+        int startY = Math.max(0, offsetY);
+        int endY = Math.min(targetHeight, offsetY + renderedHeight);
+        int[] sourceX = new int[Math.max(0, endX - startX)];
+        for (int x = startX; x < endX; x++) {
+            sourceX[x - startX] = Math.min(sourceWidth - 1,
+                (int) ((long) (x - offsetX) * sourceWidth / renderedWidth));
+        }
+        if (targetWidth * targetHeight > 1_000_000) {
+            renderViewportParallel(sourceIndices, result, sourceWidth, sourceHeight, targetWidth,
+                renderedHeight, offsetY, startX, endX, startY, endY, sourceX);
+        } else {
+            renderViewportRows(sourceIndices, result, sourceWidth, sourceHeight, targetWidth,
+                renderedHeight, offsetY, startX, endX, startY, endY, sourceX);
+        }
+        return result;
+    }
+
+    private void renderViewportParallel(byte[] sourceIndices, byte[] result, int sourceWidth, int sourceHeight,
+                                        int targetWidth, int renderedHeight, int offsetY, int startX, int endX,
+                                        int startY, int endY, int[] sourceX) {
+        int availableThreads = Math.max(2, Runtime.getRuntime().availableProcessors() / 2);
+        int chunkHeight = Math.max(64, (endY - startY) / availableThreads);
+        List<Future<?>> futures = new ArrayList<>();
+        for (int y = startY; y < endY; y += chunkHeight) {
+            int chunkStart = y;
+            int chunkEnd = Math.min(endY, y + chunkHeight);
+            futures.add(executor.submit(() -> renderViewportRows(
+                sourceIndices, result, sourceWidth, sourceHeight, targetWidth, renderedHeight,
+                offsetY, startX, endX, chunkStart, chunkEnd, sourceX
+            )));
+        }
+        for (Future<?> future : futures) {
+            try {
+                future.get();
+            } catch (Exception error) {
+                throw new IllegalStateException("Could not render cropped video frame", error);
+            }
+        }
+    }
+
+    private void renderViewportRows(byte[] sourceIndices, byte[] result, int sourceWidth, int sourceHeight,
+                                    int targetWidth, int renderedHeight, int offsetY, int startX, int endX,
+                                    int startY, int endY, int[] sourceX) {
+        for (int y = startY; y < endY; y++) {
+            int sourceY = Math.min(sourceHeight - 1,
+                (int) ((long) (y - offsetY) * sourceHeight / renderedHeight));
+            int sourceRow = sourceY * sourceWidth;
+            int targetRow = y * targetWidth;
+            for (int x = startX; x < endX; x++) {
+                result[targetRow + x] = sourceIndices[sourceRow + sourceX[x - startX]];
+            }
+        }
     }
 
     private void upscalePaletteIndicesSerial(byte[] sourceIndices, byte[] result,

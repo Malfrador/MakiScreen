@@ -70,6 +70,7 @@ public class PlayCommand extends ECommand {
 
         // Parse optional flags
         boolean audioFlag = false;
+        boolean acceptTools = false;
         int chunkDurationMs = AudioManager.DEFAULT_CHUNK_DURATION_MS;
         FrameProcessor.DitheringMode ditheringMode = FrameProcessor.DitheringMode.FLOYD_STEINBERG_REDUCED; // Default
         List<String> targetPlayerNames = new ArrayList<>();
@@ -98,6 +99,8 @@ public class PlayCommand extends ECommand {
                     }
                     i++; // Skip the chunk duration argument
                 }
+            } else if (args[i].equalsIgnoreCase("--accept-tools")) {
+                acceptTools = true;
             } else if (args[i].equalsIgnoreCase("--dither")) {
                 if (i + 1 < args.length) {
                     String modeArg = args[i + 1].toUpperCase();
@@ -136,7 +139,10 @@ public class PlayCommand extends ECommand {
         Screen screen = screenOpt.get();
 
         if (isUrl(fileName)) {
-            playLivestream(sender, screen, fileName, withAudio, ditheringMode, targetPlayerIds);
+            String continuationCommand = "/mcc " + String.join(" ", args) +
+                (acceptTools ? "" : " --accept-tools");
+            playLivestream(sender, screen, fileName, withAudio, ditheringMode, targetPlayerIds,
+                acceptTools, continuationCommand);
             return;
         }
 
@@ -520,107 +526,133 @@ public class PlayCommand extends ECommand {
     }
 
     private void playLivestream(CommandSender sender, Screen screen, String sourceUrl, boolean requestedAudio,
-                                FrameProcessor.DitheringMode ditheringMode, Set<UUID> targetPlayerIds) {
+                                FrameProcessor.DitheringMode ditheringMode, Set<UUID> targetPlayerIds,
+                                boolean acceptTools, String continuationCommand) {
         YoutubeDownloadManager downloadManager = plugin.getYoutubeDownloadManager();
 
-        if (!downloadManager.ensureInitialized()) {
+        if (acceptTools) {
+            downloadManager.saveUserConsent(true);
+        }
+
+        if (!downloadManager.hasUserConsent()) {
             sender.sendMessage(MM.deserialize("<yellow>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
-            sender.sendMessage(MM.deserialize("<gold><bold>Livestream Playback - First Time Setup"));
-            sender.sendMessage(MM.deserialize(""));
-            sender.sendMessage(MM.deserialize("<white>To play YouTube and Twitch livestreams, MCCinema needs <gold>yt-dlp</gold>."));
-            sender.sendMessage(MM.deserialize("<gray>What will be downloaded:"));
-            sender.sendMessage(MM.deserialize("<white>  • <gray>yt-dlp binary (<gold>~10MB</gold>)"));
-            sender.sendMessage(MM.deserialize("<white>  • <gray>From: <gold>https://github.com/yt-dlp/yt-dlp"));
-            sender.sendMessage(MM.deserialize(""));
-            sender.sendMessage(MM.deserialize("<white>To proceed, run:"));
-            sender.sendMessage(MM.deserialize("<click:suggest_command:/mcc download --accept " + sourceUrl + "><gold><bold>[CLICK HERE]</bold></gold></click> <gray>or type: <white>/mcc download --accept " + sourceUrl));
-            sender.sendMessage(MM.deserialize("<gray>After setup finishes, run your play command again."));
-            sender.sendMessage(MM.deserialize("<gray>This is a one-time setup. You won't be asked again."));
+            sender.sendMessage(MM.deserialize("<gold><bold>One-time media setup"));
+            sender.sendMessage(MM.deserialize("<gray>MCCinema will download verified, self-contained yt-dlp and Deno tools from their official GitHub releases."));
+            sender.sendMessage(Component.text("[INSTALL AND PLAY]", NamedTextColor.GREEN, TextDecoration.BOLD)
+                .clickEvent(ClickEvent.runCommand(continuationCommand)));
+            sender.sendMessage(MM.deserialize("<gray>Console: <white>" + escape(continuationCommand)));
             sender.sendMessage(MM.deserialize("<yellow>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
             return;
         }
 
-        if (!downloadManager.isReady()) {
-            sender.sendMessage(MM.deserialize("<yellow>yt-dlp is still initializing... Please wait a moment and try again."));
+        if (downloadManager.isReady()) {
+            resolveAndLoadLivestream(sender, screen, sourceUrl, requestedAudio, ditheringMode, targetPlayerIds);
             return;
         }
 
-        if (requestedAudio) {
-            sender.sendMessage(MM.deserialize("<yellow>⚠ Live audio is not supported yet; starting video-only livestream playback."));
-        }
-
-        VideoPlayer existingPlayer = plugin.getVideoPlayer(screen);
-        if (existingPlayer != null && existingPlayer.getState() == VideoPlayer.State.PLAYING) {
-            existingPlayer.stop();
-        }
-
-        sender.sendMessage(MM.deserialize("<yellow>Resolving livestream..."));
-
-        new BukkitRunnable() {
-            @Override
-            public void run() {
-                try {
-                    LivestreamResolver resolver = new LivestreamResolver(plugin, downloadManager);
-                    LivestreamResolver.Livestream livestream = resolver.resolve(sourceUrl);
-
-                    VideoPlayer player = new VideoPlayer(plugin, screen);
-                    player.setTargetPlayerIds(targetPlayerIds);
-                    QualityCommand.applyScreenPreset(player, screen);
-                    player.getFrameProcessor().setDitheringMode(ditheringMode);
-
-                    new BukkitRunnable() {
-                        @Override
-                        public void run() {
-                            if (!player.loadLiveStream(livestream.streamUrl(), livestream.displayName())) {
-                                sender.sendMessage(MM.deserialize("<red>Failed to load livestream!"));
-                                return;
-                            }
-
-                            plugin.registerVideoPlayer(screen, player);
-
-                            player.setOnComplete(p -> {
-                                stopProgressBar();
-                                Bukkit.broadcast(MM.deserialize("<gray>Livestream playback ended."));
-                            });
-
-                            player.setOnStateChange(p -> {
-                                if (p.getState() == VideoPlayer.State.PLAYING) {
-                                    startProgressBar(p);
-                                } else if (p.getState() == VideoPlayer.State.STOPPED || p.getState() == VideoPlayer.State.IDLE) {
-                                    stopProgressBar();
-                                }
-                            });
-
-                            player.play();
-                            String ditherInfo = "\n<gray>  Dithering: <white>" + formatDitheringMode(ditheringMode);
-                            String viewerInfo = formatViewerInfo(player);
-                            sender.sendMessage(MM.deserialize(
-                                "<green>▶ Now playing live: <white>" + livestream.displayName() +
-                                "\n<gray>  On screen: <white>" + screen.getName() +
-                                "\n<gray>  Duration: <red>LIVE" +
-                                "\n<gray>  Frame rate: <white>" + String.format("%.1f", player.getFrameRate()) + " fps" +
-                                ditherInfo +
-                                viewerInfo +
-                                "\n<gray>  Audio: <yellow>Not supported for livestreams"
-                            ));
-                        }
-                    }.runTask(plugin);
-                } catch (Exception e) {
-                    new BukkitRunnable() {
-                        @Override
-                        public void run() {
-                            sender.sendMessage(MM.deserialize("<red>Failed to resolve livestream!"));
-                            sender.sendMessage(MM.deserialize("<gray>Error: " + e.getMessage()));
-                        }
-                    }.runTask(plugin);
+        sender.sendMessage(MM.deserialize("<yellow>Preparing media support... Playback will continue automatically."));
+        downloadManager.initializeAsync().whenComplete((ignored, error) ->
+            plugin.getServer().getScheduler().runTask(plugin, () -> {
+                if (error != null) {
+                    sender.sendMessage(MM.deserialize("<red>Media setup failed. <gray>" +
+                        escape(downloadManager.userMessage(error))));
+                    downloadManager.logYtDlpFailure("initialize media support", sourceUrl, error);
+                    return;
                 }
+                resolveAndLoadLivestream(sender, screen, sourceUrl, requestedAudio, ditheringMode, targetPlayerIds);
+            })
+        );
+    }
+
+    private void resolveAndLoadLivestream(CommandSender sender, Screen screen, String sourceUrl,
+                                          boolean requestedAudio, FrameProcessor.DitheringMode ditheringMode,
+                                          Set<UUID> targetPlayerIds) {
+        if (requestedAudio) {
+            sender.sendMessage(MM.deserialize("<yellow>Live audio is not supported yet; playing the video stream only."));
+        }
+        sender.sendMessage(MM.deserialize("<yellow>Connecting to livestream..."));
+
+        plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
+            VideoPlayer player = null;
+            try {
+                LivestreamResolver resolver = new LivestreamResolver(plugin, plugin.getYoutubeDownloadManager());
+                LivestreamResolver.Livestream livestream = resolver.resolve(sourceUrl);
+
+                player = new VideoPlayer(plugin, screen);
+                player.setTargetPlayerIds(targetPlayerIds);
+                QualityCommand.applyScreenPreset(player, screen);
+                player.getFrameProcessor().setDitheringMode(ditheringMode);
+                player.setLiveStreamRefreshHandler(() -> {
+                    LivestreamResolver.Livestream refreshed = resolver.resolve(sourceUrl);
+                    return new VideoPlayer.LiveStreamSource(refreshed.streamUrl(), refreshed.headers());
+                });
+                if (!player.loadLiveStream(livestream.streamUrl(), livestream.displayName(), livestream.headers())) {
+                    player.shutdown();
+                    plugin.getServer().getScheduler().runTask(plugin, () ->
+                        sender.sendMessage(MM.deserialize("<red>Could not connect to the livestream. <gray>See the server log for details."))
+                    );
+                    return;
+                }
+
+                VideoPlayer loadedPlayer = player;
+                plugin.getServer().getScheduler().runTask(plugin, () -> activateLivestream(
+                    sender, screen, loadedPlayer, livestream, ditheringMode
+                ));
+            } catch (Exception error) {
+                if (player != null) {
+                    player.shutdown();
+                }
+                YoutubeDownloadManager manager = plugin.getYoutubeDownloadManager();
+                manager.logYtDlpFailure("resolve livestream", sourceUrl, error);
+                plugin.getServer().getScheduler().runTask(plugin, () -> {
+                    sender.sendMessage(MM.deserialize("<red>Could not play livestream. <gray>" +
+                        escape(manager.userMessage(error))));
+                });
             }
-        }.runTaskAsynchronously(plugin);
+        });
+    }
+
+    private void activateLivestream(CommandSender sender, Screen screen, VideoPlayer player,
+                                    LivestreamResolver.Livestream livestream,
+                                    FrameProcessor.DitheringMode ditheringMode) {
+        VideoPlayer existingPlayer = plugin.getVideoPlayer(screen);
+        if (existingPlayer != null && existingPlayer != player) {
+            existingPlayer.shutdown();
+        }
+        plugin.registerVideoPlayer(screen, player);
+
+        player.setOnComplete(p -> {
+            stopProgressBar();
+            Bukkit.broadcast(MM.deserialize("<gray>Livestream playback ended."));
+        });
+        player.setOnStateChange(p -> {
+            if (p.getState() == VideoPlayer.State.PLAYING) {
+                startProgressBar(p);
+            } else if (p.getState() == VideoPlayer.State.STOPPED || p.getState() == VideoPlayer.State.IDLE) {
+                stopProgressBar();
+            }
+        });
+
+        player.play();
+        String ditherInfo = "\n<gray>  Dithering: <white>" + formatDitheringMode(ditheringMode);
+        String viewerInfo = formatViewerInfo(player);
+        sender.sendMessage(MM.deserialize(
+            "<green>▶ Now playing live: <white>" + escape(livestream.displayName()) +
+            "\n<gray>  On screen: <white>" + escape(screen.getName()) +
+            "\n<gray>  Duration: <red>LIVE" +
+            "\n<gray>  Frame rate: <white>" + String.format("%.1f", player.getFrameRate()) + " fps" +
+            ditherInfo + viewerInfo +
+            "\n<gray>  Audio: <yellow>Not supported for livestreams"
+        ));
     }
 
     private boolean isUrl(String source) {
         String lower = source.toLowerCase(Locale.ROOT);
         return lower.startsWith("http://") || lower.startsWith("https://");
+    }
+
+    private static String escape(String value) {
+        return MM.escapeTags(value == null ? "Unknown media error" : value);
     }
 
     private boolean isAudioChunkArgument(String value) {

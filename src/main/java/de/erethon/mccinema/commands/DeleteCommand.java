@@ -2,16 +2,12 @@ package de.erethon.mccinema.commands;
 
 import de.erethon.mccinema.MCCinema;
 import de.erethon.mccinema.screen.Screen;
+import de.erethon.mccinema.screen.ScreenManager;
 import de.erethon.mccinema.video.VideoPlayer;
 import de.erethon.bedrock.command.ECommand;
 import net.kyori.adventure.text.minimessage.MiniMessage;
-import org.apache.commons.io.FileUtils;
-import org.bukkit.Bukkit;
-import org.bukkit.World;
 import org.bukkit.command.CommandSender;
 
-import java.io.File;
-import java.io.IOException;
 import java.util.List;
 import java.util.Optional;
 
@@ -55,11 +51,19 @@ public class DeleteCommand extends ECommand {
             plugin.unregisterVideoPlayer(screen);
         }
 
-        plugin.getScreenManager().deleteScreen(screen);
+        ScreenManager.DeletionResult result = plugin.getScreenManager().deleteScreen(screen);
+        if (!result.deleted()) {
+            sender.sendMessage(MM.deserialize(
+                "<red>Could not delete screen '<white>" + screenName + "</white>'. " +
+                "<gray>Its world or placement data is currently unavailable."
+            ));
+            return;
+        }
 
         sender.sendMessage(MM.deserialize(
             "<green>Screen '<white>" + screenName + "</white>' deleted." +
-            "\n<gray>Note: Item frames were not removed. Remove them manually if needed."
+            "\n<gray>Removed <white>" + result.itemFramesRemoved() + "</white> item frames and <white>" +
+            result.mapItemsRemoved() + "</white> screen maps."
         ));
     }
 

@@ -21,6 +21,7 @@ import java.util.HashSet;
 import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
 import java.util.UUID;
@@ -31,6 +32,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.logging.Level;
 
 public class VideoPlayer {
 
@@ -46,11 +48,13 @@ public class VideoPlayer {
     private File videoFile;
     private String sourceName;
     private boolean liveStream;
+    private volatile VideoTransform videoTransform = VideoTransform.DEFAULT;
     private FFmpegFrameGrabber grabber;
     private Java2DFrameConverter converter;
     private ScheduledExecutorService scheduler;
     private ScheduledFuture<?> playbackTask;
     private ScheduledExecutorService liveDecoderExecutor;
+    private LiveStreamRefreshHandler liveStreamRefreshHandler;
 
     private final AtomicReference<State> state = new AtomicReference<>(State.IDLE);
     private final AtomicLong currentFrame = new AtomicLong(0);
@@ -175,6 +179,7 @@ public class VideoPlayer {
         this.videoFile = videoFile;
         this.sourceName = videoFile.getName();
         this.liveStream = false;
+        this.videoTransform = plugin.getVideoTransformManager().get(videoFile);
         state.set(State.LOADING);
         notifyStateChange();
 
@@ -195,6 +200,10 @@ public class VideoPlayer {
     }
 
     public boolean loadLiveStream(String streamUrl, String displayName) {
+        return loadLiveStream(streamUrl, displayName, Map.of());
+    }
+
+    public boolean loadLiveStream(String streamUrl, String displayName, Map<String, String> headers) {
         if (state.get() == State.PLAYING) {
             stop();
         }
@@ -202,6 +211,7 @@ public class VideoPlayer {
         this.videoFile = null;
         this.sourceName = displayName;
         this.liveStream = true;
+        this.videoTransform = VideoTransform.DEFAULT;
         state.set(State.LOADING);
         notifyStateChange();
 
@@ -210,17 +220,55 @@ public class VideoPlayer {
                 grabber.close();
             }
 
-            grabber = new FFmpegFrameGrabber(streamUrl);
-            grabber.setOption("reconnect", "1");
-            grabber.setOption("reconnect_streamed", "1");
-            grabber.setOption("reconnect_delay_max", "5");
+            grabber = createLiveGrabber(streamUrl, headers);
             grabber.start();
             return initializeStartedGrabber(displayName, true);
         } catch (Exception e) {
             plugin.getLogger().severe("Failed to load livestream: " + e.getMessage());
+            try {
+                if (grabber != null) {
+                    grabber.close();
+                }
+            } catch (Exception ignored) {
+            }
+            grabber = null;
             state.set(State.IDLE);
             notifyStateChange();
             return false;
+        }
+    }
+
+    private FFmpegFrameGrabber createLiveGrabber(String streamUrl, Map<String, String> headers) {
+        FFmpegFrameGrabber liveGrabber = new FFmpegFrameGrabber(streamUrl);
+        liveGrabber.setOption("reconnect", "1");
+        liveGrabber.setOption("reconnect_streamed", "1");
+        liveGrabber.setOption("reconnect_at_eof", "1");
+        liveGrabber.setOption("reconnect_delay_max", "5");
+        applyHttpHeaders(liveGrabber, headers);
+        return liveGrabber;
+    }
+
+    private void applyHttpHeaders(FFmpegFrameGrabber target, Map<String, String> headers) {
+        if (headers == null || headers.isEmpty()) {
+            return;
+        }
+        StringBuilder customHeaders = new StringBuilder();
+        for (Map.Entry<String, String> entry : headers.entrySet()) {
+            String name = entry.getKey().replace("\r", "").replace("\n", "").strip();
+            String value = entry.getValue().replace("\r", "").replace("\n", "").strip();
+            if (name.isBlank() || value.isBlank()) {
+                continue;
+            }
+            if (name.equalsIgnoreCase("User-Agent")) {
+                target.setOption("user_agent", value);
+            } else if (name.equalsIgnoreCase("Referer")) {
+                target.setOption("referer", value);
+            } else {
+                customHeaders.append(name).append(": ").append(value).append("\r\n");
+            }
+        }
+        if (!customHeaders.isEmpty()) {
+            target.setOption("headers", customHeaders.toString());
         }
     }
 
@@ -309,7 +357,8 @@ public class VideoPlayer {
         double fitScale = Math.min(
             (double) targetWidth / sourceWidth,
             (double) targetHeight / sourceHeight
-        );
+        ) * videoTransform.zoom();
+        fitScale = Math.min(1.0, fitScale);
         if (fitScale >= 1.0) {
             return;
         }
@@ -598,7 +647,7 @@ public class VideoPlayer {
                 performanceMetrics.recordImageConversion(conversionEnd - conversionStart);
             }
             FrameProcessor.ProcessedFrame processedFrame = frameProcessor.processFrame(
-                image, screen.getPixelWidth(), screen.getPixelHeight(), performanceMetrics
+                image, screen.getPixelWidth(), screen.getPixelHeight(), performanceMetrics, videoTransform
             );
 
             long dispatchStart = System.nanoTime();
@@ -612,8 +661,7 @@ public class VideoPlayer {
             return frameNum;
 
         } catch (Exception e) {
-            plugin.getLogger().warning("Error processing frame: " + e.getMessage());
-            e.printStackTrace();
+            plugin.getLogger().log(Level.WARNING, "Error processing frame", e);
             framesSkipped.incrementAndGet();
             return currentFrame.get();
         }
@@ -665,15 +713,31 @@ public class VideoPlayer {
         });
         liveDecoderExecutor.execute(() -> {
             Java2DFrameConverter liveConverter = new Java2DFrameConverter();
-            double sourceFramesPerOutputFrame = Math.max(1.0, sourceFrameRate / LIVE_TARGET_FRAME_RATE);
             double nextOutputFrame = 0.0;
             long sourceFrameIndex = 0;
+            int consecutiveFailures = 0;
+            long nextRefreshAttemptNanos = 0L;
             while (liveDecoderRunning) {
                 try {
                     Frame frame = grabber.grabImage();
                     if (frame == null || frame.image == null) {
+                        consecutiveFailures++;
+                        if (consecutiveFailures >= 20 && System.nanoTime() >= nextRefreshAttemptNanos) {
+                            if (refreshLiveStream()) {
+                                consecutiveFailures = 0;
+                                nextRefreshAttemptNanos = 0L;
+                                nextOutputFrame = 0.0;
+                                sourceFrameIndex = 0;
+                            } else {
+                                nextRefreshAttemptNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                            }
+                        } else {
+                            Thread.sleep(100);
+                        }
                         continue;
                     }
+                    consecutiveFailures = 0;
+                    double sourceFramesPerOutputFrame = Math.max(1.0, sourceFrameRate / LIVE_TARGET_FRAME_RATE);
                     boolean keepFrame = sourceFrameIndex + 0.0001 >= nextOutputFrame;
                     sourceFrameIndex++;
                     if (!keepFrame) {
@@ -688,11 +752,60 @@ public class VideoPlayer {
                     }
                 } catch (Exception e) {
                     if (liveDecoderRunning) {
-                        plugin.getLogger().warning("Livestream decode stalled: " + e.getMessage());
+                        consecutiveFailures++;
+                        if (consecutiveFailures >= 3 && System.nanoTime() >= nextRefreshAttemptNanos && refreshLiveStream()) {
+                            consecutiveFailures = 0;
+                            nextRefreshAttemptNanos = 0L;
+                            nextOutputFrame = 0.0;
+                            sourceFrameIndex = 0;
+                        } else {
+                            if (consecutiveFailures >= 3 && System.nanoTime() >= nextRefreshAttemptNanos) {
+                                nextRefreshAttemptNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                            }
+                            if (consecutiveFailures == 1 || consecutiveFailures % 10 == 0) {
+                                plugin.getLogger().warning("Livestream decode stalled: " + e.getMessage());
+                            }
+                            try {
+                                Thread.sleep(Math.min(2000, 200L * consecutiveFailures));
+                            } catch (InterruptedException interrupted) {
+                                Thread.currentThread().interrupt();
+                                break;
+                            }
+                        }
                     }
                 }
             }
         });
+    }
+
+    private boolean refreshLiveStream() {
+        if (!liveDecoderRunning || liveStreamRefreshHandler == null) {
+            return false;
+        }
+        try {
+            plugin.getLogger().info("Refreshing expired or stalled livestream connection...");
+            LiveStreamSource source = liveStreamRefreshHandler.refresh();
+            FFmpegFrameGrabber replacement = createLiveGrabber(source.streamUrl(), source.headers());
+            replacement.start();
+            FFmpegFrameGrabber previous = grabber;
+            grabber = replacement;
+            double refreshedFrameRate = replacement.getFrameRate();
+            if (refreshedFrameRate > 0 && refreshedFrameRate <= 120) {
+                sourceFrameRate = refreshedFrameRate;
+            }
+            try {
+                if (previous != null) {
+                    previous.close();
+                }
+            } catch (Exception ignored) {
+            }
+            clearLiveFrameQueue();
+            plugin.getLogger().info("Livestream connection refreshed.");
+            return true;
+        } catch (Exception error) {
+            plugin.getLogger().warning("Could not refresh livestream connection: " + error.getMessage());
+            return false;
+        }
     }
 
     private void stopLiveDecoder() {
@@ -758,6 +871,7 @@ public class VideoPlayer {
 
     public void shutdown() {
         stop();
+        liveStreamRefreshHandler = null;
         screen.stopViewerCacheUpdater();
         frameProcessor.shutdown();
         if (scheduler != null) {
@@ -838,12 +952,35 @@ public class VideoPlayer {
         return videoFile;
     }
 
+    public VideoTransform getVideoTransform() {
+        return videoTransform;
+    }
+
+    public void setVideoTransform(VideoTransform videoTransform) {
+        this.videoTransform = videoTransform == null ? VideoTransform.DEFAULT : videoTransform;
+    }
+
     public void setOnComplete(Consumer<VideoPlayer> onComplete) {
         this.onComplete = onComplete;
     }
 
     public void setOnStateChange(Consumer<VideoPlayer> onStateChange) {
         this.onStateChange = onStateChange;
+    }
+
+    public void setLiveStreamRefreshHandler(LiveStreamRefreshHandler liveStreamRefreshHandler) {
+        this.liveStreamRefreshHandler = liveStreamRefreshHandler;
+    }
+
+    @FunctionalInterface
+    public interface LiveStreamRefreshHandler {
+        LiveStreamSource refresh() throws Exception;
+    }
+
+    public record LiveStreamSource(String streamUrl, Map<String, String> headers) {
+        public LiveStreamSource {
+            headers = headers == null ? Map.of() : Map.copyOf(headers);
+        }
     }
 
     public static String formatDuration(long milliseconds) {

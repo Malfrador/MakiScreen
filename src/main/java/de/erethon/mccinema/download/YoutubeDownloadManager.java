@@ -5,14 +5,11 @@ import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
 
 import java.io.*;
-import java.net.URI;
-import java.net.URISyntaxException;
-import java.net.URL;
-import java.nio.channels.Channels;
-import java.nio.channels.ReadableByteChannel;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
+import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
@@ -23,12 +20,11 @@ public class YoutubeDownloadManager {
 
     private final MCCinema plugin;
     private final File videosDirectory;
-    private final File ytDlpExecutable;
     private final Map<UUID, DownloadTask> activeDownloads = new ConcurrentHashMap<>();
-    private boolean ytDlpReady = false;
-    private boolean initializationInProgress = false;
-    private String jsRuntimePath = null;
-    private String ffmpegPath = null;
+    private final MediaToolchain toolchain;
+    private final FfmpegProvider ffmpegProvider;
+    private volatile boolean ffmpegDetectionComplete;
+    private long lastAutomaticRepairMillis;
 
     public YoutubeDownloadManager(MCCinema plugin) {
         this.plugin = plugin;
@@ -38,21 +34,14 @@ public class YoutubeDownloadManager {
             videosDirectory.mkdirs();
         }
 
-        // Determine OS
-        String os = System.getProperty("os.name").toLowerCase();
-        String exeName = os.contains("win") ? "yt-dlp.exe" : "yt-dlp";
-        this.ytDlpExecutable = new File(plugin.getDataFolder(), exeName);
+        this.toolchain = new MediaToolchain(plugin);
+        this.ffmpegProvider = new FfmpegProvider(plugin);
 
-        // Check if yt-dlp already exists
-        if (ytDlpExecutable.exists()) {
-            plugin.getLogger().info("yt-dlp found at: " + ytDlpExecutable.getAbsolutePath());
-            // Initialize immediately if already downloaded
-            initializeYtDlp();
-        } else {
-            plugin.getLogger().info("yt-dlp not found - will be downloaded when first needed");
-            if (plugin.getConfig().getBoolean("youtube.require-consent", true)) {
-                plugin.getLogger().info("User consent will be requested before downloading yt-dlp");
-            }
+        if (hasUserConsent()) {
+            toolchain.initializeAsync().exceptionally(error -> {
+                plugin.getLogger().warning("Media resolver initialization failed: " + rootMessage(error));
+                return null;
+            });
         }
     }
 
@@ -63,7 +52,7 @@ public class YoutubeDownloadManager {
         if (!plugin.getConfig().getBoolean("youtube.require-consent", true)) {
             return true;
         }
-        if (ytDlpExecutable.exists()) {
+        if (toolchain.executable().toFile().exists()) {
             return true;
         }
         File dataFile = new File(plugin.getDataFolder(), "data.yml");
@@ -94,327 +83,131 @@ public class YoutubeDownloadManager {
         }
     }
 
-    /**
-     * Ensure yt-dlp is initialized (download if needed with consent)
-     * @return true if ready or initialization started, false if consent needed
-     */
+    /** Starts initialization if consent has been granted. */
     public boolean ensureInitialized() {
-        if (ytDlpReady) {
-            return true;
+        if (!hasUserConsent()) {
+            return false;
         }
-
-        if (initializationInProgress) {
-            return true;
-        }
-
-        if (!ytDlpExecutable.exists()) {
-            if (!hasUserConsent()) {
-                return false;
-            }
-        }
-        initializeYtDlp();
+        initializeAsync();
         return true;
     }
 
-    /**
-     * Initialize yt-dlp - download if needed, setup if needed
-     */
-    private void initializeYtDlp() {
-        if (initializationInProgress || ytDlpReady) {
-            return;
+    public CompletableFuture<Void> initializeAsync() {
+        if (!hasUserConsent()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Media tool download consent is required"));
         }
-
-        initializationInProgress = true;
-
-        plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
-            try {
-                if (!ytDlpExecutable.exists()) {
-                    plugin.getLogger().info("yt-dlp not found, downloading...");
-                    downloadYtDlp();
-                } else {
-                    plugin.getLogger().info("yt-dlp found at: " + ytDlpExecutable.getAbsolutePath());
-                }
-
-                // Make executable on Unix systems
-                if (!System.getProperty("os.name").toLowerCase().contains("win")) {
-                    ytDlpExecutable.setExecutable(true);
-                }
-
-                // Detect JavaScript runtime for signature solving
-                detectJavaScriptRuntime();
-
-                // Detect or extract ffmpeg from JavaCV
-                detectFfmpeg();
-
-                // Test yt-dlp
-                if (testYtDlp()) {
-                    ytDlpReady = true;
-                    plugin.getLogger().info("yt-dlp is ready! Using EJS for YouTube signature solving.");
-
-                    if (jsRuntimePath != null) {
-                        plugin.getLogger().info("JavaScript runtime detected: " + jsRuntimePath);
-                        plugin.getLogger().info("EJS will use this runtime for signature challenges.");
-                    } else {
-                        plugin.getLogger().warning("No JavaScript runtime found (Node.js recommended)");
-                        plugin.getLogger().warning("Downloads may fail without a JS runtime for signature solving.");
-                        plugin.getLogger().warning("Install Node.js from: https://nodejs.org/");
-                    }
-
-                    File cookiesFile = new File(plugin.getDataFolder(), "youtube_cookies.txt");
-                    if (cookiesFile.exists()) {
-                        plugin.getLogger().info("Found YouTube cookies file - downloads will use authentication (optional but may help with some restricted videos)");
-                    } else {
-                        plugin.getLogger().info("No YouTube cookies found (optional). Most videos should work without them.");
-                        plugin.getLogger().info("If you encounter issues with age-restricted or private videos, export cookies:");
-                        plugin.getLogger().info("1. Install 'Get cookies.txt LOCALLY' browser extension");
-                        plugin.getLogger().info("2. Go to youtube.com and log in");
-                        plugin.getLogger().info("3. Export cookies and save as: youtube_cookies.txt in " + plugin.getDataFolder().getAbsolutePath());
-                    }
-                } else {
-                    plugin.getLogger().warning("yt-dlp test failed. Downloads may not work.");
-                }
-
-            } catch (Exception e) {
-                plugin.getLogger().log(Level.SEVERE, "Failed to initialize yt-dlp", e);
-            } finally {
-                initializationInProgress = false;
-            }
-        });
+        return toolchain.initializeAsync();
     }
 
-    /**
-     * Download yt-dlp from GitHub releases
-     */
-    private void downloadYtDlp() throws IOException {
-        String os = System.getProperty("os.name").toLowerCase();
-        String downloadUrl;
-
-        if (os.contains("win")) {
-            downloadUrl = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
-        } else if (os.contains("mac")) {
-            downloadUrl = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos";
-        } else {
-            downloadUrl = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp";
+    public CompletableFuture<Void> repairAsync() {
+        if (!hasUserConsent()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Media tool download consent is required"));
         }
+        return toolchain.repairAsync();
+    }
 
-        plugin.getLogger().info("Downloading yt-dlp from: " + downloadUrl);
+    public RepairRequest requestRepairAsync() {
+        if (!hasUserConsent()) {
+            return new RepairRequest(
+                CompletableFuture.failedFuture(new IllegalStateException("Media tool download consent is required")), true
+            );
+        }
+        MediaToolchain.RepairRequest request = toolchain.requestRepairAsync();
+        return new RepairRequest(request.completion(), request.started());
+    }
 
-        URL url;
+    public record RepairRequest(CompletableFuture<Void> completion, boolean started) {
+    }
+
+    private synchronized void ensureFfmpegDetected() {
+        if (!ffmpegDetectionComplete) {
+            ffmpegProvider.detect();
+            ffmpegDetectionComplete = true;
+        }
+    }
+
+    private ExternalProcess.Result executeYtDlp(List<String> arguments, Duration timeout, boolean useCookies)
+        throws Exception {
+        List<String> command = createYtDlpBaseCommand(useCookies);
+        command.addAll(arguments);
+        ExternalProcess.Result result;
         try {
-            url = new URI(downloadUrl).toURL();
-        } catch (URISyntaxException e) {
-            throw new RuntimeException(e);
-        }
-        try (ReadableByteChannel rbc = Channels.newChannel(url.openStream());
-             FileOutputStream fos = new FileOutputStream(ytDlpExecutable)) {
-            fos.getChannel().transferFrom(rbc, 0, Long.MAX_VALUE);
-        }
-
-        plugin.getLogger().info("yt-dlp downloaded successfully!");
-    }
-
-    /**
-     * Test if yt-dlp works
-     */
-    private boolean testYtDlp() {
-        try {
-            ProcessBuilder pb = new ProcessBuilder(ytDlpExecutable.getAbsolutePath(), "--version");
-            pb.redirectErrorStream(true);
-            Process process = pb.start();
-
-            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
-            String version = reader.readLine();
-
-            process.waitFor(10, TimeUnit.SECONDS);
-
-            if (version != null && !version.isEmpty()) {
-                plugin.getLogger().info("yt-dlp version: " + version);
-                return true;
+            result = ExternalProcess.run(command, timeout,
+                ffmpegDetectionComplete ? ffmpegProvider.environment() : Map.of());
+        } catch (IOException executableFailure) {
+            if (!claimAutomaticRepair()) {
+                throw executableFailure;
             }
-        } catch (Exception e) {
-            plugin.getLogger().log(Level.WARNING, "Failed to test yt-dlp", e);
+            plugin.getLogger().info("Repairing media tools after the resolver could not start...");
+            toolchain.repairAsync().get(6, TimeUnit.MINUTES);
+            command = createYtDlpBaseCommand(useCookies);
+            command.addAll(arguments);
+            return ExternalProcess.run(command, timeout,
+                ffmpegDetectionComplete ? ffmpegProvider.environment() : Map.of());
         }
-        return false;
-    }
-
-    /**
-     * Detect available JavaScript runtime for signature solving
-     */
-    private void detectJavaScriptRuntime() {
-        // Try Node.js first
-        String[] nodeCommands = {"node", "nodejs"};
-        for (String cmd : nodeCommands) {
-            if (testCommand(cmd, "--version")) {
-                jsRuntimePath = cmd;
-                return;
-            }
-        }
-
-        // Try system PATH for node.exe on Windows
-        String os = System.getProperty("os.name").toLowerCase();
-        if (os.contains("win")) {
-            String[] possiblePaths = {
-                System.getenv("ProgramFiles") + "\\nodejs\\node.exe",
-                System.getenv("ProgramFiles(x86)") + "\\nodejs\\node.exe",
-                System.getenv("LOCALAPPDATA") + "\\Programs\\nodejs\\node.exe"
-            };
-
-            for (String path : possiblePaths) {
-                if (path != null) {
-                    File nodeExe = new File(path);
-                    if (nodeExe.exists() && testCommand(path, "--version")) {
-                        jsRuntimePath = path;
-                        return;
-                    }
+        if (!result.successful()) {
+            YtDlpException failure = YtDlpException.fromProcess(result, useCookies);
+            if (failure.reason() == YtDlpException.Reason.JAVASCRIPT_RUNTIME ||
+                failure.reason() == YtDlpException.Reason.TOOL_UNAVAILABLE) {
+                if (!claimAutomaticRepair()) {
+                    return result;
                 }
+                plugin.getLogger().info("Repairing media tools after a resolver health failure...");
+                toolchain.repairAsync().get(6, TimeUnit.MINUTES);
+                command = createYtDlpBaseCommand(useCookies);
+                command.addAll(arguments);
+                return ExternalProcess.run(command, timeout,
+                    ffmpegDetectionComplete ? ffmpegProvider.environment() : Map.of());
             }
         }
-
-        // Try PhantomJS
-        if (testCommand("phantomjs", "--version")) {
-            jsRuntimePath = "phantomjs";
-            return;
-        }
-
-        plugin.getLogger().warning("No JavaScript runtime found. Some YouTube videos may fail to download due to YTs anti-bot measures.");
-        plugin.getLogger().warning("Install Node.js from https://nodejs.org/ to fix this issue and enable EJS for signature solving.");
+        return result;
     }
 
-    /**
-     * Test if a command is available
-     */
-    private boolean testCommand(String command, String... args) {
-        try {
-            List<String> cmdList = new ArrayList<>();
-            cmdList.add(command);
-            if (args != null) {
-                cmdList.addAll(Arrays.asList(args));
-            }
-
-            ProcessBuilder pb = new ProcessBuilder(cmdList);
-            pb.redirectErrorStream(true);
-            Process process = pb.start();
-
-            boolean finished = process.waitFor(5, TimeUnit.SECONDS);
-            if (!finished) {
-                process.destroyForcibly();
-                return false;
-            }
-
-            return process.exitValue() == 0;
-        } catch (Exception e) {
+    private synchronized boolean claimAutomaticRepair() {
+        long now = System.currentTimeMillis();
+        if (now - lastAutomaticRepairMillis < TimeUnit.HOURS.toMillis(1)) {
             return false;
         }
-    }
-
-    /**
-     * Detect or extract ffmpeg from JavaCV
-     */
-    private void detectFfmpeg() {
-        try {
-            String platform = org.bytedeco.javacpp.Loader.getPlatform();
-            String executableName = platform.startsWith("windows") ? "ffmpeg.exe" : "ffmpeg";
-            File ffmpegExe = org.bytedeco.javacpp.Loader.cacheResource(
-                "org/bytedeco/ffmpeg/" + platform + "/" + executableName
-            );
-
-            if (ffmpegExe != null && ffmpegExe.exists()) {
-                if (!platform.startsWith("windows")) {
-                    ffmpegExe.setExecutable(true);
-                }
-                String candidatePath = ffmpegExe.getAbsolutePath();
-                if (testCommand(candidatePath, "-version")) {
-                    ffmpegPath = candidatePath;
-                    plugin.getLogger().info("Using ffmpeg from JavaCV: " + ffmpegPath);
-                    return;
-                }
-                plugin.getLogger().warning("Bundled JavaCV ffmpeg was found but could not be executed: " + candidatePath);
-            }
-        } catch (Throwable t) {
-            plugin.getLogger().warning("Could not load ffmpeg from JavaCV: " + t.getClass().getSimpleName() + ": " + t.getMessage());
-        }
-
-        // If JavaCV's ffmpeg is unavailable or unusable, try system PATH as fallback.
-        if (testCommand("ffmpeg", "-version")) {
-            ffmpegPath = "ffmpeg";
-            plugin.getLogger().info("Using system ffmpeg from PATH (fallback)");
-            return;
-        }
-
-        plugin.getLogger().warning("ffmpeg not found. Video merging may not work properly.");
-        plugin.getLogger().warning("This shouldn't happen as ffmpeg is bundled with JavaCV.");
-        plugin.getLogger().info("yt-dlp will attempt to use its own merging logic.");
+        lastAutomaticRepairMillis = now;
+        return true;
     }
 
     /**
      * Get video information from YouTube
      */
     public VideoInfo getVideoInfo(String videoIdOrUrl) throws Exception {
-        if (!ytDlpReady) {
-            throw new Exception("yt-dlp is not ready yet or not enabled.");
-        }
-
-        List<String> command = new ArrayList<>();
-        command.add(ytDlpExecutable.getAbsolutePath());
-
-        File cookiesFile = new File(plugin.getDataFolder(), "youtube_cookies.txt");
-        if (cookiesFile.exists()) {
-            command.add("--cookies");
-            command.add(cookiesFile.getAbsolutePath());
-        }
-
-        command.add("--remote-components");
-        command.add("ejs:github");
-
-        if (jsRuntimePath != null) {
-            command.add("--js-runtimes");
-            command.add(jsRuntimePath);
-        }
-
-        command.add("--ignore-errors");
-        command.add("--no-abort-on-error");
-
-        command.add("--dump-json");
-        command.add("--no-playlist");
-        command.add(videoIdOrUrl);
-
-        ProcessBuilder pb = new ProcessBuilder(command);
-        pb.redirectErrorStream(true);
-        Process process = pb.start();
-
-        StringBuilder output = new StringBuilder();
-        StringBuilder jsonOutput = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                output.append(line).append("\n");
-                if (!line.startsWith("WARNING:") && !line.startsWith("ERROR:") &&
-                    !line.startsWith("[") && !line.contains("ffmpeg not found")) {
-                    jsonOutput.append(line);
+        try {
+            return getVideoInfo(videoIdOrUrl, false);
+        } catch (YtDlpException error) {
+            if (error.reason() == YtDlpException.Reason.AUTHENTICATION_REQUIRED) {
+                MediaToolchain.CookieStatus cookies = cookieStatus();
+                if (cookies.usable()) {
+                    plugin.getLogger().info("Media requires authentication; retrying with the configured YouTube cookies.");
+                    return getVideoInfo(videoIdOrUrl, true);
+                }
+                if (!cookies.description().equals("Not configured")) {
+                    throw YtDlpException.fromProcess(new ExternalProcess.Result(
+                        1, false, "Cookie file is invalid: " + cookies.description()), true);
                 }
             }
+            throw error;
         }
+    }
 
-        boolean finished = process.waitFor(30, TimeUnit.SECONDS);
-        if (!finished) {
-            process.destroyForcibly();
-            throw new Exception("Timeout while fetching video info");
+    private VideoInfo getVideoInfo(String videoIdOrUrl, boolean useCookies) throws Exception {
+        if (!toolchain.isReady()) {
+            throw new IllegalStateException("Media resolver is not ready");
         }
-
-        if (process.exitValue() != 0) {
-            String error = output.toString();
-            if (error.contains("Sign in") || error.contains("login") || error.contains("bot")) {
-                throw new Exception("YouTube requires authentication. Please provide cookies file.");
-            }
-            if (error.contains("Signature solving failed") || error.contains("n challenge solving failed")) {
-                throw new Exception("YouTube signature decryption failed. Cookies are required for this video.");
-            }
-            throw new Exception("Failed to fetch video info: " + error);
+        List<String> arguments = new ArrayList<>(List.of(
+            "--dump-single-json", "--no-playlist", videoIdOrUrl
+        ));
+        ExternalProcess.Result result = executeYtDlp(arguments, Duration.ofSeconds(45), useCookies);
+        String jsonString = extractJson(result.output());
+        if (!result.successful() || jsonString == null) {
+            throw YtDlpException.fromProcess(result, useCookies);
         }
-
-        String jsonString = jsonOutput.toString().trim();
         if (jsonString.isEmpty()) {
-            throw new Exception("No JSON output received from yt-dlp. Full output: " + output.toString());
+            throw YtDlpException.fromProcess(result, useCookies);
         }
 
         JSONObject json = JSON.parseObject(jsonString);
@@ -422,7 +215,8 @@ public class YoutubeDownloadManager {
             json.getString("id"),
             json.getString("title"),
             json.getString("uploader"),
-            json.getInteger("duration")
+            json.getIntValue("duration"),
+            useCookies
         );
     }
 
@@ -436,8 +230,8 @@ public class YoutubeDownloadManager {
 
         plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
             try {
-                if (!ytDlpReady) {
-                    throw new Exception("yt-dlp is not ready yet. Please wait and try again.");
+                if (!toolchain.isReady()) {
+                    throw new IllegalStateException("Media resolver is not ready");
                 }
 
                 task.setState(DownloadState.FETCHING_INFO);
@@ -446,7 +240,9 @@ public class YoutubeDownloadManager {
 
                 task.setState(DownloadState.DOWNLOADING);
 
-                String fileName = customName != null ? customName : sanitizeFilename(videoInfo.title);
+                String sourceName = customName != null ? customName :
+                    (videoInfo.title == null || videoInfo.title.isBlank() ? videoInfo.id : videoInfo.title);
+                String fileName = sanitizeFilename(sourceName);
                 File outputFile = new File(videosDirectory, fileName + ".mp4");
 
                 plugin.getLogger().info("Downloading video: " + videoInfo.title);
@@ -457,40 +253,31 @@ public class YoutubeDownloadManager {
                     plugin.getLogger().info("FPS conversion disabled - video will keep original framerate");
                 }
 
-                List<String> command = new ArrayList<>();
-                command.add(ytDlpExecutable.getAbsolutePath());
-
-                File cookiesFile = new File(plugin.getDataFolder(), "youtube_cookies.txt");
-                if (cookiesFile.exists()) {
-                    command.add("--cookies");
-                    command.add(cookiesFile.getAbsolutePath());
-                }
-                command.add("--remote-components");
-                command.add("ejs:github");
-                if (jsRuntimePath != null) {
-                    command.add("--js-runtimes");
-                    command.add(jsRuntimePath);
-                }
-                String ytDlpFfmpegLocation = getYtDlpFfmpegLocation();
+                ensureFfmpegDetected();
+                List<String> command = createYtDlpBaseCommand(videoInfo.useCookies);
+                String ytDlpFfmpegLocation = ffmpegProvider.location();
                 if (ytDlpFfmpegLocation != null) {
                     command.add("--ffmpeg-location");
                     command.add(ytDlpFfmpegLocation);
                 }
                 command.add("-f");
-                command.add("bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best");
-                command.add("--merge-output-format");
-                command.add("mp4");
+                if (ffmpegProvider.available()) {
+                    command.add("bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4][height<=1080]/best[height<=1080]/best");
+                    command.add("--merge-output-format");
+                    command.add("mp4");
+                } else {
+                    command.add("best[ext=mp4][height<=1080]/best[height<=1080]/best");
+                }
                 command.add("-o");
                 command.add(outputFile.getAbsolutePath());
                 command.add("--no-playlist");
-                command.add("--ignore-errors");
-                command.add("--no-abort-on-error");
                 command.add("--progress");
                 command.add("--newline");
                 command.add(videoIdOrUrl);
 
                 ProcessBuilder pb = new ProcessBuilder(command);
                 pb.redirectErrorStream(true);
+                ffmpegProvider.configure(pb);
                 Process process = pb.start();
 
                 Pattern progressPattern = Pattern.compile("\\[download\\]\\s+(\\d+\\.\\d+)%");
@@ -520,7 +307,7 @@ public class YoutubeDownloadManager {
                     File finalFile = outputFile;
 
                     // Convert video to 20 FPS if requested
-                    if (convertToFps) {
+                    if (convertToFps && ffmpegProvider.available()) {
                         plugin.getLogger().info("Download complete, converting to 20 FPS...");
                         if (callback != null) {
                             callback.onConversionStart("Download complete! Converting video to 20 FPS for optimal playback...");
@@ -537,8 +324,10 @@ public class YoutubeDownloadManager {
                             plugin.getLogger().log(Level.SEVERE, "Error during video conversion: ", conversionException);
                             plugin.getLogger().warning("Using original video without FPS conversion");
                         }
-                    } else {
+                    } else if (!convertToFps) {
                         plugin.getLogger().info("Download complete (FPS conversion skipped)");
+                    } else {
+                        plugin.getLogger().warning("Download complete, but FPS conversion was skipped because ffmpeg is unavailable.");
                     }
 
                     task.setState(DownloadState.COMPLETED);
@@ -548,7 +337,9 @@ public class YoutubeDownloadManager {
                     }
                 } else {
                     String errorMsg = !errorOutput.isEmpty() ? errorOutput.toString() : "yt-dlp exited with code: " + exitCode;
-                    throw new Exception(errorMsg);
+                    throw YtDlpException.fromProcess(
+                        new ExternalProcess.Result(exitCode, false, errorMsg), videoInfo.useCookies
+                    );
                 }
 
             } catch (Exception e) {
@@ -557,7 +348,7 @@ public class YoutubeDownloadManager {
                 if (callback != null) {
                     callback.onError(e);
                 }
-                plugin.getLogger().log(Level.WARNING, "Failed to download video: " + videoIdOrUrl, e);
+                logYtDlpFailure("download video", videoIdOrUrl, e);
             } finally {
                 activeDownloads.remove(downloadId);
             }
@@ -566,25 +357,11 @@ public class YoutubeDownloadManager {
         return task;
     }
 
-    private String getYtDlpFfmpegLocation() {
-        if (ffmpegPath == null) {
-            return null;
-        }
-
-        File ffmpegFile = new File(ffmpegPath);
-        if (!ffmpegFile.isAbsolute()) {
-            return null;
-        }
-
-        File parent = ffmpegFile.getParentFile();
-        return parent != null ? parent.getAbsolutePath() : ffmpegPath;
-    }
-
     /**
      * Convert a video file to 20 FPS using ffmpeg
      */
     private File convertVideoTo20FPS(File inputFile) throws Exception {
-        if (ffmpegPath == null) {
+        if (!ffmpegProvider.available()) {
             plugin.getLogger().warning("ffmpeg not available, skipping framerate conversion");
             return inputFile;
         }
@@ -620,7 +397,7 @@ public class YoutubeDownloadManager {
 
         // ffmpeg command to convert to 20 FPS
         List<String> command = new ArrayList<>();
-        command.add(ffmpegPath);
+        command.add(ffmpegProvider.executable());
         command.add("-i");
         command.add(inputFile.getAbsolutePath());
         command.add("-r");
@@ -643,6 +420,7 @@ public class YoutubeDownloadManager {
 
         ProcessBuilder pb = new ProcessBuilder(command);
         pb.redirectErrorStream(true);
+        ffmpegProvider.configure(pb);
         Process process = pb.start();
 
         StringBuilder output = new StringBuilder();
@@ -708,7 +486,14 @@ public class YoutubeDownloadManager {
 
 
     private String sanitizeFilename(String name) {
+        if (name == null || name.isBlank()) {
+            return "video";
+        }
         String sanitized = name.replaceAll("[^a-zA-Z0-9.-]", "_");
+        sanitized = sanitized.replaceAll("^\\.+", "");
+        if (sanitized.isBlank()) {
+            sanitized = "video";
+        }
         if (sanitized.length() > 200) {
             sanitized = sanitized.substring(0, 200);
         }
@@ -716,28 +501,100 @@ public class YoutubeDownloadManager {
     }
 
     public boolean isReady() {
-        return ytDlpReady;
+        return toolchain.isReady();
     }
 
     public List<String> createYtDlpBaseCommand() {
-        List<String> command = new ArrayList<>();
-        command.add(ytDlpExecutable.getAbsolutePath());
+        return createYtDlpBaseCommand(false);
+    }
 
-        File cookiesFile = new File(plugin.getDataFolder(), "youtube_cookies.txt");
-        if (cookiesFile.exists()) {
-            command.add("--cookies");
-            command.add(cookiesFile.getAbsolutePath());
+    public List<String> createYtDlpBaseCommand(boolean useCookies) {
+        return toolchain.baseCommand(useCookies);
+    }
+
+    ExternalProcess.Result executeResolver(List<String> arguments, Duration timeout, boolean useCookies)
+        throws Exception {
+        return executeYtDlp(arguments, timeout, useCookies);
+    }
+
+    MediaToolchain.CookieStatus cookieStatus() {
+        return toolchain.cookieStatus();
+    }
+
+    public boolean hasUsableCookies() {
+        return toolchain.cookieStatus().usable();
+    }
+
+    public String cookieStatusDescription() {
+        return toolchain.cookieStatus().description();
+    }
+
+    public String ytDlpVersion() {
+        return toolchain.ytDlpVersion();
+    }
+
+    public String jsRuntimeVersion() {
+        return toolchain.jsRuntimeVersion();
+    }
+
+    public String initializationFailure() {
+        return toolchain.failureMessage();
+    }
+
+    public boolean isInitializing() {
+        return toolchain.isInitializing();
+    }
+
+    public String userMessage(Throwable error) {
+        Throwable root = rootCause(error);
+        if (root instanceof YtDlpException ytDlp) {
+            return ytDlp.getMessage();
         }
+        return "The media service is currently unavailable. Please try again shortly.";
+    }
 
-        command.add("--remote-components");
-        command.add("ejs:github");
-
-        if (jsRuntimePath != null) {
-            command.add("--js-runtimes");
-            command.add(jsRuntimePath);
+    public void logYtDlpFailure(String operation, String source, Throwable error) {
+        Throwable root = rootCause(error);
+        if (root instanceof YtDlpException ytDlp) {
+            plugin.getLogger().warning("Failed to " + operation + " (" + ytDlp.reason() + ") for " + source +
+                ": " + summarizeDiagnostics(ytDlp.diagnostics()));
+        } else {
+            plugin.getLogger().log(Level.WARNING, "Failed to " + operation + " for " + source, root);
         }
+    }
 
-        return command;
+    private String extractJson(String output) {
+        if (output == null) {
+            return null;
+        }
+        return output.lines().map(String::trim)
+            .filter(line -> line.startsWith("{") && line.endsWith("}"))
+            .reduce((first, second) -> second)
+            .orElse(null);
+    }
+
+    private static Throwable rootCause(Throwable error) {
+        Throwable current = error;
+        while (current.getCause() != null &&
+            (current instanceof java.util.concurrent.CompletionException ||
+                current instanceof java.util.concurrent.ExecutionException)) {
+            current = current.getCause();
+        }
+        return current;
+    }
+
+    private static String rootMessage(Throwable error) {
+        Throwable root = rootCause(error);
+        return root.getMessage() == null ? root.getClass().getSimpleName() : root.getMessage();
+    }
+
+    private static String summarizeDiagnostics(String diagnostics) {
+        if (diagnostics == null || diagnostics.isBlank()) {
+            return "no diagnostic output";
+        }
+        String summary = diagnostics.lines().map(String::trim).filter(line -> !line.isBlank())
+            .reduce((first, second) -> second).orElse("no diagnostic output");
+        return summary.length() > 500 ? summary.substring(0, 500) + "..." : summary;
     }
 
     public static class VideoInfo {
@@ -745,12 +602,14 @@ public class YoutubeDownloadManager {
         public final String title;
         public final String uploader;
         public final int duration;
+        private final boolean useCookies;
 
-        public VideoInfo(String id, String title, String uploader, int duration) {
+        public VideoInfo(String id, String title, String uploader, int duration, boolean useCookies) {
             this.id = id;
             this.title = title;
             this.uploader = uploader;
             this.duration = duration;
+            this.useCookies = useCookies;
         }
     }
 }

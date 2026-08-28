@@ -5,15 +5,17 @@ import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
 import de.erethon.mccinema.MCCinema;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
+import java.net.URI;
+import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.concurrent.TimeUnit;
+import java.util.Map;
 
 public class LivestreamResolver {
 
-    private static final String LIVE_FORMAT = "best[protocol^=m3u8]/best";
+    private static final String LIVE_FORMAT =
+        "bestvideo[protocol^=m3u8]/best[vcodec!=none][protocol^=m3u8]/bestvideo/best[vcodec!=none]";
 
     private final MCCinema plugin;
     private final YoutubeDownloadManager downloadManager;
@@ -30,49 +32,60 @@ public class LivestreamResolver {
 
     public Livestream resolve(String url) throws Exception {
         if (!downloadManager.isReady()) {
-            throw new Exception("yt-dlp is not ready yet. Please wait and try again.");
+            throw new IllegalStateException("Media resolver is not ready");
         }
-
-        List<String> command = downloadManager.createYtDlpBaseCommand();
-        command.add("-f");
-        command.add(LIVE_FORMAT);
-        command.add("--dump-json");
-        command.add("--no-playlist");
-        command.add("--ignore-errors");
-        command.add("--no-abort-on-error");
-        command.add(url);
-
-        ProcessBuilder pb = new ProcessBuilder(command);
-        pb.redirectErrorStream(true);
-        Process process = pb.start();
-
-        StringBuilder output = new StringBuilder();
-        StringBuilder jsonOutput = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                output.append(line).append("\n");
-                String trimmed = line.trim();
-                if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
-                    jsonOutput.append(trimmed);
+        try {
+            return resolve(url, false);
+        } catch (YtDlpException error) {
+            if (error.reason() == YtDlpException.Reason.AUTHENTICATION_REQUIRED && isYouTubeUrl(url)) {
+                MediaToolchain.CookieStatus cookies = downloadManager.cookieStatus();
+                if (cookies.usable()) {
+                    plugin.getLogger().info("Livestream requires authentication; retrying with configured cookies.");
+                    return resolve(url, true);
+                }
+                if (!cookies.description().equals("Not configured")) {
+                    throw YtDlpException.fromProcess(new ExternalProcess.Result(
+                        1, false, "Cookie file is invalid: " + cookies.description()), true);
                 }
             }
+            throw error;
+        }
+    }
+
+    private boolean isYouTubeUrl(String source) {
+        try {
+            String host = URI.create(source).getHost();
+            if (host == null) {
+                return false;
+            }
+            String lower = host.toLowerCase(Locale.ROOT);
+            return lower.equals("youtu.be") || lower.equals("youtube.com") || lower.endsWith(".youtube.com");
+        } catch (IllegalArgumentException ignored) {
+            return false;
+        }
+    }
+
+    private Livestream resolve(String url, boolean useCookies) throws Exception {
+        List<String> arguments = List.of(
+            "-f", LIVE_FORMAT,
+            "--dump-single-json",
+            "--no-playlist",
+            url
+        );
+        ExternalProcess.Result result = downloadManager.executeResolver(arguments, Duration.ofSeconds(60), useCookies);
+        String jsonOutput = result.output().lines().map(String::trim)
+            .filter(line -> line.startsWith("{") && line.endsWith("}"))
+            .reduce((first, second) -> second).orElse(null);
+        if (!result.successful() || jsonOutput == null) {
+            throw YtDlpException.fromProcess(result, useCookies);
         }
 
-        boolean finished = process.waitFor(45, TimeUnit.SECONDS);
-        if (!finished) {
-            process.destroyForcibly();
-            throw new Exception("Timed out while resolving livestream URL");
-        }
-
-        if (process.exitValue() != 0 || jsonOutput.isEmpty()) {
-            throw new Exception(formatResolverError(output.toString()));
-        }
-
-        JSONObject json = JSON.parseObject(jsonOutput.toString());
+        JSONObject json = JSON.parseObject(jsonOutput);
         String streamUrl = findStreamUrl(json);
         if (streamUrl == null || streamUrl.isBlank()) {
-            throw new Exception("Could not find a playable livestream URL");
+            throw YtDlpException.fromProcess(
+                new ExternalProcess.Result(1, false, "No playable video URL was present in yt-dlp output"), useCookies
+            );
         }
 
         String title = firstNonBlank(json.getString("title"), "Livestream");
@@ -83,7 +96,7 @@ public class LivestreamResolver {
             plugin.getLogger().info("Resolved URL is not marked as live by yt-dlp: " + liveStatus);
         }
 
-        return new Livestream(url, streamUrl, title, uploader, liveStatus);
+        return new Livestream(url, streamUrl, title, uploader, liveStatus, readHeaders(json));
     }
 
     private String findStreamUrl(JSONObject json) {
@@ -117,31 +130,31 @@ public class LivestreamResolver {
         return null;
     }
 
-    private String formatResolverError(String output) {
-        String lower = output.toLowerCase(Locale.ROOT);
-        if (lower.contains("offline") || lower.contains("not currently live")) {
-            return "This channel or video is not currently live.";
+    private Map<String, String> readHeaders(JSONObject json) {
+        JSONObject source = json.getJSONObject("http_headers");
+        if (source == null || source.isEmpty()) {
+            return Map.of();
         }
-        if (lower.contains("private") || lower.contains("members-only") || lower.contains("subscriber-only")) {
-            return "This stream is private or restricted.";
+        Map<String, String> headers = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> entry : source.entrySet()) {
+            if (entry.getKey() == null || entry.getValue() == null) {
+                continue;
+            }
+            String name = entry.getKey().replace("\r", "").replace("\n", "").strip();
+            String value = String.valueOf(entry.getValue()).replace("\r", "").replace("\n", "").strip();
+            if (!name.isBlank() && !value.isBlank()) {
+                headers.put(name, value);
+            }
         }
-        if (lower.contains("sign in") || lower.contains("login") || lower.contains("authentication") || lower.contains("cookies")) {
-            return "This stream requires authentication. Add cookies to youtube_cookies.txt if this is a YouTube stream.";
-        }
-        if (lower.contains("unsupported url")) {
-            return "Unsupported livestream URL. YouTube and Twitch links are supported.";
-        }
-        if (output.isBlank()) {
-            return "yt-dlp did not return a playable livestream.";
-        }
-        return "Failed to resolve livestream: " + output.strip();
+        return Map.copyOf(headers);
     }
 
     private String firstNonBlank(String first, String fallback) {
         return first != null && !first.isBlank() ? first : fallback;
     }
 
-    public record Livestream(String pageUrl, String streamUrl, String title, String uploader, String liveStatus) {
+    public record Livestream(String pageUrl, String streamUrl, String title, String uploader, String liveStatus,
+                             Map<String, String> headers) {
         public String displayName() {
             if (uploader != null && !uploader.isBlank()) {
                 return title + " - " + uploader;
