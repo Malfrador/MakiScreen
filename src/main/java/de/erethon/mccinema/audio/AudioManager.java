@@ -22,6 +22,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Predicate;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -38,6 +39,11 @@ public class AudioManager {
     private final int chunkDurationMs; // 0 = single file mode
     private final boolean positionalAudio; // broken right now
     private Set<UUID> targetPlayerIds;
+    private Predicate<Player> playbackFilter = player -> true;
+
+    public void setPlaybackFilter(Predicate<Player> filter) {
+        playbackFilter = filter;
+    }
 
     private final AtomicInteger currentChunkIndex = new AtomicInteger(-1);
     private final AtomicBoolean isPlaying = new AtomicBoolean(false);
@@ -306,7 +312,7 @@ public class AudioManager {
         AudioChunk chunk = chunks.get(index);
         String key = SOUND_NAMESPACE + ":" + videoId + ".chunk_" + chunk.index();
         for (Player player : getAudioRecipients()) {
-            player.playSound(location, key, SoundCategory.RECORDS, 1.0f, 1.0f);
+            if (playbackFilter.test(player)) player.playSound(location, key, SoundCategory.RECORDS, 1.0f, 1.0f);
         }
     }
 

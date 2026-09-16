@@ -22,6 +22,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 public class PacketDispatcher {
+    private boolean experimentalFilm;
+    private final java.util.Map<java.util.UUID, Long> filmViewerGenerations = new java.util.concurrent.ConcurrentHashMap<>();
+
+    public void setExperimentalFilm(boolean enabled) {
+        experimentalFilm = enabled;
+    }
 
     public enum PatchStrategy {
         BOUNDING_BOX,
@@ -226,12 +232,12 @@ public class PacketDispatcher {
             int changedPixels = update.dirtyRegion().changedPixelCount();
             int accumulated = tile.getAccumulatedChanges();
 
-            if (useEntropyFiltering && staleness < 2 && !hasSignificantChanges(update.dirtyRegion().data())) {
+            if (!experimentalFilm && useEntropyFiltering && staleness < 2 && !hasSignificantChanges(update.dirtyRegion().data())) {
                 lowPriorityUpdates.add(prepared);
                 continue;
             }
 
-            if (useSpatialDownsampling && !isSceneChange && staleness == 0 && changedPixels < MapTile.TOTAL_PIXELS / 4) {
+            if (!experimentalFilm && useSpatialDownsampling && !isSceneChange && staleness == 0 && changedPixels < MapTile.TOTAL_PIXELS / 4) {
                 if (highMotionFrame || !isHighContrast(update.dirtyRegion().data())) {
                     int pattern = (tile.getTileX() + tile.getTileY() + (frameCounter % 2)) % 2;
                     if (pattern != 0) {
@@ -428,6 +434,22 @@ public class PacketDispatcher {
         lastFrameBoundingBytes.set(sentBoundingBytes);
         lastFrameFullMapBytes.set(sentFullMapBytes);
 
+        if (experimentalFilm) {
+            for (Player viewer : recipients) {
+                long generation = plugin.getFilmResourcePack().loadedGeneration(viewer);
+                if (generation != 0 && !java.util.Objects.equals(filmViewerGenerations.get(viewer.getUniqueId()), generation)) {
+                    // Synchronize with the shared SENT baseline, not the newest frame,
+                    // which may include tiles deferred by the bandwidth budget.
+                    List<ClientboundMapItemDataPacket> baseline = new ArrayList<>();
+                    for (MapTile tile : screen.getTiles()) {
+                        baseline.add(createFullMapPacket(tile.getMapId(), tile.getLastSentData()));
+                    }
+                    sendPacketsToPlayer(viewer, baseline);
+                    filmViewerGenerations.put(viewer.getUniqueId(), generation);
+                }
+            }
+        }
+
         if (packets.isEmpty()) {
             lastFramePacketCount.set(0);
             lastFrameBytesSent.set(0);
@@ -471,6 +493,11 @@ public class PacketDispatcher {
         }
 
         byte[] mapData = update.mapData();
+        // Encoded bytes are not colours: never discard small components or replace
+        // the compact payload with a full map based on visual-density heuristics.
+        if (experimentalFilm) {
+            return new PreparedUpdate(update, List.of(dirtyRegion), dirtyRegion.getDataSize(), dirtyRegion.getDataSize());
+        }
         if (mapData == null || mapData.length != MapTile.TOTAL_PIXELS) {
             return new PreparedUpdate(update, List.of(dirtyRegion), dirtyRegion.getDataSize(), dirtyRegion.getDataSize());
         }
@@ -729,11 +756,36 @@ public class PacketDispatcher {
         }
     }
 
+    /**
+     * Send a complete still frame and make it the baseline for future delta
+     * updates. This is used for paused seeks, where deferred updates would never
+     * otherwise be flushed until playback resumes.
+     */
+    public void dispatchImmediateFrame(Screen screen, byte[][] mapData, Collection<? extends Player> recipients) {
+        deferredUpdates.clear();
+        sceneChangeFramesRemaining = 0;
+        dispatchFullFrame(screen, mapData, recipients);
+
+        for (MapTile tile : screen.getTiles()) {
+            int tileIndex = tile.getTileIndex();
+            if (tileIndex < 0 || tileIndex >= mapData.length || mapData[tileIndex] == null) {
+                continue;
+            }
+            tile.setLastSentData(mapData[tileIndex].clone());
+            tile.resetFramesSinceLastSend();
+            tile.resetAccumulatedChanges();
+        }
+    }
+
     public void sendLastFrameToPlayer(Player player, Screen screen) {
         List<ClientboundMapItemDataPacket> packets = new ArrayList<>();
 
         for (MapTile tile : screen.getTiles()) {
             byte[] data = tile.getLastFrameData();
+            if (de.erethon.mccinema.video.film.FilmCodec.isEncoded(data)) {
+                if (!plugin.getFilmResourcePack().isLoaded(player)) continue;
+                data = tile.getLastSentData();
+            }
             if (data != null && data.length > 0) {
                 boolean hasData = false;
                 for (byte b : data) {

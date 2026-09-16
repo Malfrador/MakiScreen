@@ -38,6 +38,7 @@ public final class MCCinema extends EPlugin implements Listener {
     private ResourcePackManager resourcePackManager;
     private YoutubeDownloadManager youtubeDownloadManager;
     private ResourcePackListener resourcePackListener;
+    private de.erethon.mccinema.video.film.FilmResourcePack filmResourcePack;
     private VideoTransformManager videoTransformManager;
     private VideoTransformEditor videoTransformEditor;
     private final Map<UUID, VideoPlayer> videoPlayers = new ConcurrentHashMap<>();
@@ -116,6 +117,8 @@ public final class MCCinema extends EPlugin implements Listener {
         getServer().getPluginManager().registerEvents(this, this);
         resourcePackListener = new ResourcePackListener(this);
         getServer().getPluginManager().registerEvents(resourcePackListener, this);
+        filmResourcePack = new de.erethon.mccinema.video.film.FilmResourcePack(this);
+        getServer().getPluginManager().registerEvents(filmResourcePack, this);
         videoTransformEditor = new VideoTransformEditor(this);
         getServer().getPluginManager().registerEvents(videoTransformEditor, this);
         logger.info("MCCinema enabled!");
@@ -218,5 +221,9 @@ public final class MCCinema extends EPlugin implements Listener {
 
     public ResourcePackListener getResourcePackListener() {
         return resourcePackListener;
+    }
+
+    public de.erethon.mccinema.video.film.FilmResourcePack getFilmResourcePack() {
+        return filmResourcePack;
     }
 }

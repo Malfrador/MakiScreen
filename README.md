@@ -1,7 +1,7 @@
 Paper plugin to play back video (and audio) in-game without the use of clientside mods.
 
 ## Features
-* Play local MP4/MKV/AVI/WEBM files or download videos directly from YouTube (optional)
+* Play local MP4/MKV/AVI/WEBM/MOV files or download videos directly from YouTube (optional)
 * Automatic resource pack generation and hosting for synchronized audio playback
 * True 1080p or even 4K playback with efficient tile-based rendering
     * Only limit is the server and player bandwidth.
@@ -16,7 +16,7 @@ Paper plugin to play back video (and audio) in-game without the use of clientsid
 _All commands have helpful tab-completion available_
 1) Use `/mcc create <screen id> <aspect ratio> [x] [y]` while looking at the lower left corner to create a screen
     * Tip: Make sure your screen is evenly lit, e.g. using light blocks.
-2) Place your video `.mp4` files in `/plugins/MCCinema/videos/`
+2) Place your `.mp4`, `.mkv`, `.avi`, `.webm`, or `.mov` files in `/plugins/MCCinema/videos/`
 3) Use `/mcc play <screen id> <video>` to start playback. Optionally include the `--audio <chunk size>` parameter to play with audio.
     * For audio, this plugin will use [mcpacks.dev](https://mcpacks.dev/) for Resourcepack hosting by default.
     * Alternatively, it can automatically host a resourcepack server if audio is enabled. On some hosts this may fail.

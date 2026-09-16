@@ -7,6 +7,7 @@ import de.erethon.mccinema.download.YoutubeDownloadManager;
 import de.erethon.mccinema.resourcepack.ResourcePackManager;
 import de.erethon.mccinema.screen.Screen;
 import de.erethon.mccinema.video.FrameProcessor;
+import de.erethon.mccinema.video.VideoFileTypes;
 import de.erethon.mccinema.video.VideoPlayer;
 import de.erethon.bedrock.command.ECommand;
 import net.kyori.adventure.bossbar.BossBar;
@@ -55,13 +56,13 @@ public class PlayCommand extends ECommand {
         setConsoleCommand(true);
         setMinArgs(0);
         setMaxArgs(99);
-        setHelp("/mcc play <screen> <file-or-url> [--audio [chunk_seconds|single]] [--dither <mode>] [players...]");
+        setHelp("/mcc play <screen> <file-or-url> [--audio [chunk_seconds|single]] [--dither <mode>] [--experimental] [players...]");
     }
 
     @Override
     public void onExecute(String[] args, CommandSender sender) {
         if (args.length < 3) {
-            sender.sendMessage(MM.deserialize("<red>Usage: /mcc play <screen> <file-or-url> [--audio [chunk_seconds|single]] [--dither <mode>] [players...]"));
+            sender.sendMessage(MM.deserialize("<red>Usage: /mcc play <screen> <file-or-url> [--audio [chunk_seconds|single]] [--dither <mode>] [--experimental] [players...]"));
             return;
         }
 
@@ -70,6 +71,8 @@ public class PlayCommand extends ECommand {
 
         // Parse optional flags
         boolean audioFlag = false;
+        boolean experimentalFlag = false;
+        boolean explicitDither = false;
         boolean acceptTools = false;
         int chunkDurationMs = AudioManager.DEFAULT_CHUNK_DURATION_MS;
         FrameProcessor.DitheringMode ditheringMode = FrameProcessor.DitheringMode.FLOYD_STEINBERG_REDUCED; // Default
@@ -101,7 +104,10 @@ public class PlayCommand extends ECommand {
                 }
             } else if (args[i].equalsIgnoreCase("--accept-tools")) {
                 acceptTools = true;
+            } else if (args[i].equalsIgnoreCase("--experimental")) {
+                experimentalFlag = true;
             } else if (args[i].equalsIgnoreCase("--dither")) {
+                explicitDither = true;
                 if (i + 1 < args.length) {
                     String modeArg = args[i + 1].toUpperCase();
                     try {
@@ -125,6 +131,15 @@ public class PlayCommand extends ECommand {
         }
 
         final boolean withAudio = audioFlag;
+        final boolean experimental = experimentalFlag;
+        if (experimental && explicitDither) {
+            sender.sendMessage(Component.text("--experimental uses a film codec and cannot be combined with --dither.", NamedTextColor.RED));
+            return;
+        }
+        if (experimental && plugin.getResourcePackManager() == null) {
+            sender.sendMessage(Component.text("Enable resourcepack.enabled before using --experimental.", NamedTextColor.RED));
+            return;
+        }
         Set<UUID> targetPlayerIds = resolveTargetPlayers(targetPlayerNames, sender);
         if (targetPlayerIds == null) {
             return;
@@ -142,7 +157,7 @@ public class PlayCommand extends ECommand {
             String continuationCommand = "/mcc " + String.join(" ", args) +
                 (acceptTools ? "" : " --accept-tools");
             playLivestream(sender, screen, fileName, withAudio, ditheringMode, targetPlayerIds,
-                acceptTools, continuationCommand);
+                acceptTools, continuationCommand, experimental);
             return;
         }
 
@@ -172,6 +187,15 @@ public class PlayCommand extends ECommand {
         new BukkitRunnable() {
             @Override
             public void run() {
+                if (experimental) {
+                    try {
+                        plugin.getFilmResourcePack().prepare();
+                    } catch (java.io.IOException failure) {
+                        plugin.getServer().getScheduler().runTask(plugin, () -> sender.sendMessage(
+                            Component.text("Could not prepare film decoder: " + failure.getMessage(), NamedTextColor.RED)));
+                        return;
+                    }
+                }
                 VideoPlayer player = new VideoPlayer(plugin, screen);
                 player.setTargetPlayerIds(finalTargetPlayerIds);
 
@@ -246,6 +270,7 @@ public class PlayCommand extends ECommand {
                         }
 
                         plugin.registerVideoPlayer(screen, player);
+                        if (experimental) player.enableExperimentalFilm(sender);
 
                         player.setOnComplete(p -> {
                             stopProgressBar();
@@ -288,10 +313,10 @@ public class PlayCommand extends ECommand {
                                         // Start playback immediately if no viewers
                                         player.play();
                                         String audioInfo = finalAudioManager != null ? "\n<gray>  Audio: <green>✓ Enabled" : "";
-                                        String ditherInfo = "\n<gray>  Dithering: <white>" + formatDitheringMode(finalDitheringMode);
+                                        String ditherInfo = (experimental ? "\n<gray>  Rendering: <white>Experimental film" : "\n<gray>  Dithering: <white>" + formatDitheringMode(finalDitheringMode));
                                         String viewerInfo = formatViewerInfo(player);
                                         sender.sendMessage(MM.deserialize(
-                                            "<green>▶ Now playing: <white>" + finalVideoFile.getName() +
+                                            (experimental ? "<yellow>Film queued: <white>" : "<green>▶ Now playing: <white>") + finalVideoFile.getName() +
                                             "\n<gray>  On screen: <white>" + screen.getName() +
                                             "\n<gray>  Duration: <white>" + VideoPlayer.formatDuration(player.getTotalDurationMs()) +
                                             "\n<gray>  Frame rate: <white>" + String.format("%.1f", player.getFrameRate()) + " fps" +
@@ -324,11 +349,11 @@ public class PlayCommand extends ECommand {
                                                     player.play();
 
                                                     String audioInfo = finalAudioManager != null ? "\n<gray>  Audio: <green>✓ Enabled" : "";
-                                                    String ditherInfo = "\n<gray>  Dithering: <white>" + formatDitheringMode(finalDitheringMode);
+                                                    String ditherInfo = (experimental ? "\n<gray>  Rendering: <white>Experimental film" : "\n<gray>  Dithering: <white>" + formatDitheringMode(finalDitheringMode));
                                                     String viewerInfo = formatViewerInfo(player);
                                                     String loadStatus = success ? "<green>✓ Resource pack loaded" : "<yellow>⚠ Started without waiting (timeout)";
                                                     sender.sendMessage(MM.deserialize(
-                                                        "<green>▶ Now playing: <white>" + finalVideoFile.getName() +
+                                                        (experimental ? "<yellow>Film queued: <white>" : "<green>▶ Now playing: <white>") + finalVideoFile.getName() +
                                                         "\n<gray>  On screen: <white>" + screen.getName() +
                                                         "\n<gray>  Duration: <white>" + VideoPlayer.formatDuration(player.getTotalDurationMs()) +
                                                         "\n<gray>  Frame rate: <white>" + String.format("%.1f", player.getFrameRate()) + " fps" +
@@ -351,10 +376,10 @@ public class PlayCommand extends ECommand {
                         player.play();
 
                         String audioInfo = finalAudioManager != null ? "\n<gray>  Audio: <green>✓ Enabled" : "";
-                        String ditherInfo = "\n<gray>  Dithering: <white>" + formatDitheringMode(finalDitheringMode);
+                        String ditherInfo = (experimental ? "\n<gray>  Rendering: <white>Experimental film" : "\n<gray>  Dithering: <white>" + formatDitheringMode(finalDitheringMode));
                         String viewerInfo = formatViewerInfo(player);
                         sender.sendMessage(MM.deserialize(
-                            "<green>▶ Now playing: <white>" + finalVideoFile.getName() +
+                            (experimental ? "<yellow>Film queued: <white>" : "<green>▶ Now playing: <white>") + finalVideoFile.getName() +
                             "\n<gray>  On screen: <white>" + screen.getName() +
                             "\n<gray>  Duration: <white>" + VideoPlayer.formatDuration(player.getTotalDurationMs()) +
                             "\n<gray>  Frame rate: <white>" + String.format("%.1f", player.getFrameRate()) + " fps" +
@@ -487,9 +512,7 @@ public class PlayCommand extends ECommand {
         if (args.length == 3) {
             File videosDir = new File(plugin.getDataFolder(), "videos");
             if (videosDir.exists()) {
-                String[] files = videosDir.list((dir, name) ->
-                    name.endsWith(".mp4") || name.endsWith(".mkv") ||
-                    name.endsWith(".avi") || name.endsWith(".webm"));
+                String[] files = videosDir.list((dir, name) -> VideoFileTypes.isSupported(name));
                 if (files != null) {
                     return Arrays.stream(files)
                         .filter(s -> s.toLowerCase().startsWith(args[2].toLowerCase()))
@@ -517,7 +540,7 @@ public class PlayCommand extends ECommand {
             }
 
             return filterCompletions(currentArg, combinedCompletions(
-                List.of("--audio", "--dither"),
+                List.of("--audio", "--dither", "--experimental"),
                 onlinePlayerNames()
             ));
         }
@@ -527,7 +550,7 @@ public class PlayCommand extends ECommand {
 
     private void playLivestream(CommandSender sender, Screen screen, String sourceUrl, boolean requestedAudio,
                                 FrameProcessor.DitheringMode ditheringMode, Set<UUID> targetPlayerIds,
-                                boolean acceptTools, String continuationCommand) {
+                                boolean acceptTools, String continuationCommand, boolean experimental) {
         YoutubeDownloadManager downloadManager = plugin.getYoutubeDownloadManager();
 
         if (acceptTools) {
@@ -546,7 +569,7 @@ public class PlayCommand extends ECommand {
         }
 
         if (downloadManager.isReady()) {
-            resolveAndLoadLivestream(sender, screen, sourceUrl, requestedAudio, ditheringMode, targetPlayerIds);
+            resolveAndLoadLivestream(sender, screen, sourceUrl, requestedAudio, ditheringMode, targetPlayerIds, experimental);
             return;
         }
 
@@ -559,14 +582,14 @@ public class PlayCommand extends ECommand {
                     downloadManager.logYtDlpFailure("initialize media support", sourceUrl, error);
                     return;
                 }
-                resolveAndLoadLivestream(sender, screen, sourceUrl, requestedAudio, ditheringMode, targetPlayerIds);
+                resolveAndLoadLivestream(sender, screen, sourceUrl, requestedAudio, ditheringMode, targetPlayerIds, experimental);
             })
         );
     }
 
     private void resolveAndLoadLivestream(CommandSender sender, Screen screen, String sourceUrl,
                                           boolean requestedAudio, FrameProcessor.DitheringMode ditheringMode,
-                                          Set<UUID> targetPlayerIds) {
+                                          Set<UUID> targetPlayerIds, boolean experimental) {
         if (requestedAudio) {
             sender.sendMessage(MM.deserialize("<yellow>Live audio is not supported yet; playing the video stream only."));
         }
@@ -575,6 +598,7 @@ public class PlayCommand extends ECommand {
         plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
             VideoPlayer player = null;
             try {
+                if (experimental) plugin.getFilmResourcePack().prepare();
                 LivestreamResolver resolver = new LivestreamResolver(plugin, plugin.getYoutubeDownloadManager());
                 LivestreamResolver.Livestream livestream = resolver.resolve(sourceUrl);
 
@@ -596,7 +620,7 @@ public class PlayCommand extends ECommand {
 
                 VideoPlayer loadedPlayer = player;
                 plugin.getServer().getScheduler().runTask(plugin, () -> activateLivestream(
-                    sender, screen, loadedPlayer, livestream, ditheringMode
+                    sender, screen, loadedPlayer, livestream, ditheringMode, experimental
                 ));
             } catch (Exception error) {
                 if (player != null) {
@@ -614,12 +638,13 @@ public class PlayCommand extends ECommand {
 
     private void activateLivestream(CommandSender sender, Screen screen, VideoPlayer player,
                                     LivestreamResolver.Livestream livestream,
-                                    FrameProcessor.DitheringMode ditheringMode) {
+                                    FrameProcessor.DitheringMode ditheringMode, boolean experimental) {
         VideoPlayer existingPlayer = plugin.getVideoPlayer(screen);
         if (existingPlayer != null && existingPlayer != player) {
             existingPlayer.shutdown();
         }
         plugin.registerVideoPlayer(screen, player);
+        if (experimental) player.enableExperimentalFilm(sender);
 
         player.setOnComplete(p -> {
             stopProgressBar();
@@ -634,10 +659,10 @@ public class PlayCommand extends ECommand {
         });
 
         player.play();
-        String ditherInfo = "\n<gray>  Dithering: <white>" + formatDitheringMode(ditheringMode);
+        String ditherInfo = (experimental ? "\n<gray>  Rendering: <white>Experimental film" : "\n<gray>  Dithering: <white>" + formatDitheringMode(ditheringMode));
         String viewerInfo = formatViewerInfo(player);
         sender.sendMessage(MM.deserialize(
-            "<green>▶ Now playing live: <white>" + escape(livestream.displayName()) +
+            (experimental ? "<yellow>Film stream queued: <white>" : "<green>▶ Now playing live: <white>") + escape(livestream.displayName()) +
             "\n<gray>  On screen: <white>" + escape(screen.getName()) +
             "\n<gray>  Duration: <red>LIVE" +
             "\n<gray>  Frame rate: <white>" + String.format("%.1f", player.getFrameRate()) + " fps" +

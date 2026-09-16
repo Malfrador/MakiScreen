@@ -192,6 +192,18 @@ public class ScreenManager {
         return detached;
     }
 
+    public void attachScreenRenderers(Screen screen) {
+        for (MapTile tile : screen.getTiles()) {
+            MapView mapView = Bukkit.getMap(tile.getMapId());
+            if (mapView == null) continue;
+            // Renderers are not persisted with saved screen/map IDs across restarts.
+            for (MapRenderer renderer : List.copyOf(mapView.getRenderers())) {
+                mapView.removeRenderer(renderer);
+            }
+            mapView.addRenderer(new ScreenMapRenderer(tile, screen));
+        }
+    }
+
     private RemovalCounts removeScreenFrames(Screen screen, World world) {
         Set<UUID> removedFrames = new HashSet<>();
         int mapsRemoved = 0;

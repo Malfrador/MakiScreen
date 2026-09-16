@@ -44,6 +44,15 @@ public class VideoPlayer {
     private final Screen screen;
     private final FrameProcessor frameProcessor;
     private final PacketDispatcher packetDispatcher;
+    private de.erethon.mccinema.video.film.FilmPlaybackGate filmGate;
+
+    public void enableExperimentalFilm(org.bukkit.command.CommandSender sender) {
+        plugin.getScreenManager().attachScreenRenderers(screen);
+        frameProcessor.setExperimentalFilm(true);
+        packetDispatcher.setExperimentalFilm(true);
+        filmGate = new de.erethon.mccinema.video.film.FilmPlaybackGate(plugin, this, sender);
+        if (audioManager != null) audioManager.setPlaybackFilter(this::canSendTo);
+    }
 
     private File videoFile;
     private String sourceName;
@@ -79,6 +88,7 @@ public class VideoPlayer {
     private AudioManager audioManager;
     private long playbackStartTime;
     private long pausedAtFrame;
+    private boolean pausedSeekFrameRendered;
 
     private static final long DEFAULT_AV_SYNC_THRESHOLD_NS = 150_000_000L;
     private static final int DEFAULT_MAX_DROP_FRAMES_PER_CYCLE = 8;
@@ -125,6 +135,7 @@ public class VideoPlayer {
 
     public void setAudioManager(AudioManager audioManager) {
         this.audioManager = audioManager;
+        if (audioManager != null && filmGate != null) audioManager.setPlaybackFilter(this::canSendTo);
         if (audioManager != null && hasTargetPlayerLimit()) {
             audioManager.setTargetPlayerIds(targetPlayerIds);
         }
@@ -146,7 +157,8 @@ public class VideoPlayer {
     }
 
     public boolean canSendTo(Player player) {
-        return !hasTargetPlayerLimit() || targetPlayerIds.contains(player.getUniqueId());
+        return (!hasTargetPlayerLimit() || targetPlayerIds.contains(player.getUniqueId()))
+            && (filmGate == null || plugin.getFilmResourcePack().isLoaded(player));
     }
 
     public Collection<Player> getPlaybackViewers() {
@@ -165,6 +177,9 @@ public class VideoPlayer {
     }
 
     private Collection<? extends Player> getPacketRecipients() {
+        if (filmGate != null) {
+            return getPlaybackViewers().stream().filter(this::canSendTo).toList();
+        }
         if (!hasTargetPlayerLimit()) {
             return screen.getViewers();
         }
@@ -393,6 +408,8 @@ public class VideoPlayer {
             return;
         }
 
+        if (filmGate != null && !filmGate.beforePlay()) return;
+
         screen.updateViewerCache();
         plugin.getScreenManager().fillScreenWithPlaybackBackground(screen, getPacketRecipients());
 
@@ -436,6 +453,7 @@ public class VideoPlayer {
             stopLiveDecoder();
         }
         pausedAtFrame = currentFrame.get();
+        pausedSeekFrameRendered = false;
         if (audioManager != null) {
             audioManager.pause();
         }
@@ -455,12 +473,20 @@ public class VideoPlayer {
         if (liveStream) {
             startLiveDecoder();
         }
-        // Schedule from pausedAtFrame - 1 because processNextFrame will increment currentFrame
-        scheduleNextFrame(pausedAtFrame - 1);
+        if (pausedSeekFrameRendered) {
+            // The requested frame is already visible. Continue with the following
+            // frame after one frame interval instead of drawing it a second time.
+            scheduleNextFrame(pausedAtFrame);
+        } else {
+            // currentFrame points at the first frame that has not been rendered yet.
+            scheduleNextFrame(pausedAtFrame - 1);
+        }
+        pausedSeekFrameRendered = false;
         plugin.getLogger().info("Resumed playback from frame " + pausedAtFrame);
     }
 
     public void stop() {
+        if (filmGate != null) filmGate.cancel();
         State previousState = state.get();
         if (previousState == State.STOPPED || previousState == State.IDLE) {
             return; // Already stopped
@@ -489,6 +515,7 @@ public class VideoPlayer {
             }
         } catch (Exception ignored) {}
         currentFrame.set(0);
+        pausedSeekFrameRendered = false;
 
         if (previousState == State.PLAYING || previousState == State.PAUSED) {
             plugin.getLogger().info("Stopped playback");
@@ -503,7 +530,7 @@ public class VideoPlayer {
         seek(frameNumber, timeMs);
     }
 
-    private void seek(long frameNumber, long audioTimeMs) {
+    private synchronized void seek(long frameNumber, long audioTimeMs) {
         if (grabber == null) return;
         if (liveStream) {
             plugin.getLogger().warning("Cannot seek a livestream");
@@ -523,7 +550,12 @@ public class VideoPlayer {
             if (currentState == State.PAUSED || currentState == State.PLAYING) {
                 playbackStartTime = System.nanoTime() - (long)(frameNumber / frameRate * 1_000_000_000L);
             }
-            if (currentState == State.PLAYING) {
+            if (currentState == State.PAUSED) {
+                pausedAtFrame = frameNumber;
+                pausedSeekFrameRendered = renderPausedSeekFrame(frameNumber);
+                currentFrame.set(pausedSeekFrameRendered ? frameNumber + 1 : frameNumber);
+            } else if (currentState == State.PLAYING) {
+                pausedSeekFrameRendered = false;
                 if (playbackTask != null) {
                     playbackTask.cancel(false);
                 }
@@ -532,6 +564,52 @@ public class VideoPlayer {
             }
         } catch (Exception e) {
             plugin.getLogger().warning("Failed to seek: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Decode and send one requested frame without starting playback. A full
+     * snapshot is intentional here: while paused there are no later frames that
+     * could flush updates deferred by the normal bandwidth budget.
+     */
+    private boolean renderPausedSeekFrame(long frameNumber) {
+        long frameStartTime = System.nanoTime();
+        try {
+            long decodeStart = System.nanoTime();
+            Frame frame = grabber.grabImage();
+            long decodeEnd = System.nanoTime();
+            performanceMetrics.recordFrameDecode(decodeEnd - decodeStart);
+            if (frame == null || frame.image == null) {
+                plugin.getLogger().warning("Could not render paused seek frame " + frameNumber);
+                return false;
+            }
+
+            long conversionStart = System.nanoTime();
+            BufferedImage image = converter.convert(frame);
+            long conversionEnd = System.nanoTime();
+            performanceMetrics.recordImageConversion(conversionEnd - conversionStart);
+            if (image == null) {
+                plugin.getLogger().warning("Could not convert paused seek frame " + frameNumber);
+                return false;
+            }
+
+            FrameProcessor.ProcessedFrame processedFrame = frameProcessor.processFrame(
+                image, screen.getPixelWidth(), screen.getPixelHeight(), performanceMetrics, videoTransform
+            );
+
+            long dispatchStart = System.nanoTime();
+            packetDispatcher.dispatchImmediateFrame(screen, processedFrame.fullMapData(), getPacketRecipients());
+            performanceMetrics.recordPacketDispatch(System.nanoTime() - dispatchStart);
+
+            framesProcessed.incrementAndGet();
+            lastFrameTime = System.nanoTime();
+            performanceMetrics.recordTotalFrame(lastFrameTime - frameStartTime);
+            updateDebugMetrics(frameStartTime);
+            return true;
+        } catch (Exception e) {
+            plugin.getLogger().log(Level.WARNING, "Failed to render paused seek frame " + frameNumber, e);
+            framesSkipped.incrementAndGet();
+            return false;
         }
     }
 
@@ -569,7 +647,7 @@ public class VideoPlayer {
         }
     }
 
-    private long processNextFrame() {
+    private synchronized long processNextFrame() {
         if (state.get() != State.PLAYING) {
             return currentFrame.get();
         }
@@ -870,6 +948,7 @@ public class VideoPlayer {
     }
 
     public void shutdown() {
+        if (filmGate != null) filmGate.cancel();
         stop();
         liveStreamRefreshHandler = null;
         screen.stopViewerCacheUpdater();
@@ -1055,7 +1134,8 @@ public class VideoPlayer {
         String message = String.format(
             "<gray>FPS: <white>%.1f</white> <dark_gray>|</dark_gray> " +
             "T: <white>%.1fms</white> <dark_gray>[</dark_gray>" +
-            "<yellow>D:%.1f</yellow> <gold>Di:%.1f</gold> <gold>U:%.1f</gold> <aqua>Ti:%.1f</aqua>" +
+            "<yellow>D:%.1f</yellow> <gold>" + (frameProcessor.isExperimentalFilm() ? "C:" : "Di:") +
+            "%.1f</gold> <gold>U:%.1f</gold> <aqua>Ti:%.1f</aqua>" +
             "<dark_gray>]</dark_gray> " +
             "<dark_gray>|</dark_gray> BW: <white>%s/s</white> <gray>(%s/f cap:%s)</gray> " +
             "<dark_gray>|</dark_gray> <light_purple>Tiles:<white>%d</white> MR:<white>%d</white> Avg:<white>%s</white> Save:<white>%.0f%%</white>/<green>%.0f%%</green> M:<white>%.2f</white> A:<white>%s</white></light_purple>" +

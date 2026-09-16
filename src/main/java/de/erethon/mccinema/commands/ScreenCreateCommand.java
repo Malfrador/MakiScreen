@@ -138,7 +138,7 @@ public class ScreenCreateCommand extends ECommand {
                 int tileIndex = (screen.getMapHeight() - 1 - y) * screen.getMapWidth() + x;
                 MapTile tile = new MapTile(mapView.getId(), x, screen.getMapHeight() - 1 - y, tileIndex);
                 screen.addTile(tile);
-                mapView.addRenderer(new ScreenMapRenderer(tile));
+                mapView.addRenderer(new ScreenMapRenderer(tile, screen));
                 plugin.getScreenManager().tagScreenMap(mapItem, screen, tile);
 
                 maps.add(mapItem);

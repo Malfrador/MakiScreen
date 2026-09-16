@@ -110,6 +110,10 @@ public class MapTile implements ConfigurationSerializable {
      * Calculate dirty region compared to what was sent
      */
     public DirtyRegion calculateDirtyRegionFromSent(byte[] newData) {
+        return calculateDirtyRegionFromSent(newData, false);
+    }
+
+    public DirtyRegion calculateDirtyRegionFromSent(byte[] newData, boolean exact) {
         if (needsFullUpdate || lastSentData == null) {
             needsFullUpdate = false;
             return new DirtyRegion(0, 0, SIZE, SIZE, newData);
@@ -196,13 +200,13 @@ public class MapTile implements ConfigurationSerializable {
             }
         }
 
-        if (maxX < 0 || changedPixelCount < MIN_CHANGE_THRESHOLD) {
+        if (maxX < 0 || (!exact && changedPixelCount < MIN_CHANGE_THRESHOLD)) {
             return null;
         }
 
         // Skip if change density is too low
         float changeDensity = (float)changedPixelCount / TOTAL_PIXELS;
-        if (changeDensity < MIN_CHANGE_DENSITY) {
+        if (!exact && changeDensity < MIN_CHANGE_DENSITY) {
             return null;
         }
 
@@ -212,7 +216,7 @@ public class MapTile implements ConfigurationSerializable {
         boolean largeBox = boundingBoxSize > TOTAL_PIXELS * 0.7;
         boolean highDensity = changeDensity > 0.5f;
 
-        if (largeBox && highDensity) {
+        if (!exact && largeBox && highDensity) {
             return new DirtyRegion(0, 0, SIZE, SIZE, newData, changedPixelCount);
         }
 
@@ -225,7 +229,7 @@ public class MapTile implements ConfigurationSerializable {
             }
 
             // Clone the data since we're returning it
-            byte[] result = patchData.clone();
+            byte[] result = Arrays.copyOf(patchData, boundingBoxSize);
             return new DirtyRegion(minX, minY, width, height, result, changedPixelCount);
         } finally {
             ByteArrayPool.releaseTileBuffer();

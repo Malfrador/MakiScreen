@@ -2,6 +2,7 @@ package de.erethon.mccinema.commands;
 
 import de.erethon.mccinema.MCCinema;
 import de.erethon.mccinema.screen.Screen;
+import de.erethon.mccinema.video.VideoFileTypes;
 import de.erethon.mccinema.video.VideoPlayer;
 import de.erethon.bedrock.command.ECommand;
 import net.kyori.adventure.text.minimessage.MiniMessage;
@@ -73,10 +74,7 @@ public class ListCommand extends ECommand {
             videosDir.mkdirs();
         }
 
-        File[] files = videosDir.listFiles((dir, name) ->
-            name.endsWith(".mp4") || name.endsWith(".mkv") ||
-            name.endsWith(".avi") || name.endsWith(".webm") ||
-            name.endsWith(".mov"));
+        File[] files = videosDir.listFiles((dir, name) -> VideoFileTypes.isSupported(name));
 
         if (files == null || files.length == 0) {
             sender.sendMessage(MM.deserialize("<gray>No video files found."));

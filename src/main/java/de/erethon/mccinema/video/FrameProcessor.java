@@ -21,6 +21,15 @@ import static de.erethon.mccinema.dither.DitherLookupUtil.COLOR_MAP;
 import static de.erethon.mccinema.dither.DitherLookupUtil.FULL_COLOR_MAP;
 
 public class FrameProcessor {
+    private boolean experimentalFilm;
+
+    public void setExperimentalFilm(boolean enabled) {
+        experimentalFilm = enabled;
+    }
+
+    public boolean isExperimentalFilm() {
+        return experimentalFilm;
+    }
 
     public enum DitheringMode {
         FLOYD_STEINBERG,
@@ -50,6 +59,7 @@ public class FrameProcessor {
     private final int frameWidth;
     private final int frameHeight;
     private final ExecutorService executor;
+    private final de.erethon.mccinema.video.film.FilmFrameProcessor filmFrameProcessor;
     private byte[] ditheredFrameData;
     private byte[] previousDitheredFrame;
     private int[] previousSourceHash;
@@ -105,6 +115,7 @@ public class FrameProcessor {
             t.setDaemon(true);
             return t;
         });
+        this.filmFrameProcessor = new de.erethon.mccinema.video.film.FilmFrameProcessor(executor);
     }
 
     private void loadDitheringConfig(FileConfiguration config) {
@@ -201,6 +212,10 @@ public class FrameProcessor {
 
     public ProcessedFrame processFrame(BufferedImage sourceImage, int targetWidth, int targetHeight,
                                        PerformanceMetrics metrics, VideoTransform transform) {
+        if (experimentalFilm) {
+            return filmFrameProcessor.process(sourceImage, screen,
+                transform == null ? VideoTransform.DEFAULT : transform, metrics);
+        }
         int sourceWidth = sourceImage.getWidth();
         int sourceHeight = sourceImage.getHeight();
         byte[] sourceFrameData = extractFrameData(sourceImage, sourceWidth, sourceHeight);

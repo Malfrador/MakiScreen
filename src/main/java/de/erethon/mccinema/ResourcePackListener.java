@@ -28,6 +28,8 @@ public class ResourcePackListener implements Listener {
 
     @EventHandler
     public void onResourcePackStatus(PlayerResourcePackStatusEvent event) {
+        // This pack has its own strict load tracking and must not complete an audio wait.
+        if (plugin.getFilmResourcePack() != null && plugin.getFilmResourcePack().isDecoderPack(event.getID())) return;
         Player player = event.getPlayer();
         PlayerResourcePackStatusEvent.Status status = event.getStatus();
 
