@@ -1,26 +1,14 @@
 package de.erethon.mccinema.commands;
 
-import de.erethon.bedrock.command.ECommand;
 import net.kyori.adventure.text.minimessage.MiniMessage;
 import org.bukkit.command.CommandSender;
 
-import java.util.List;
-
-public class HelpCommand extends ECommand {
+public class HelpCommand {
 
     private static final MiniMessage MM = MiniMessage.miniMessage();
 
-    public HelpCommand() {
-        setCommand("help");
-        setAliases("?");
-        setPermission("mccinema.help");
-        setPlayerCommand(true);
-        setConsoleCommand(true);
-        setMaxArgs(99);
-    }
 
-    @Override
-    public void onExecute(String[] args, CommandSender sender) {
+    public void onExecute(CommandSender sender) {
         sender.sendMessage(MM.deserialize("""
             <gold><bold>MCCinema Commands</bold></gold>
             
@@ -52,9 +40,5 @@ public class HelpCommand extends ECommand {
             <dark_gray>Place video files in: plugins/mccScreen/videos/"""));
     }
 
-    @Override
-    public List<String> onTabComplete(CommandSender sender, String[] args) {
-        return List.of();
-    }
 }
 

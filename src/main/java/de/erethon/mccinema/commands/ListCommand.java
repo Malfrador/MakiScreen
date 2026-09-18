@@ -4,42 +4,19 @@ import de.erethon.mccinema.MCCinema;
 import de.erethon.mccinema.screen.Screen;
 import de.erethon.mccinema.video.VideoFileTypes;
 import de.erethon.mccinema.video.VideoPlayer;
-import de.erethon.bedrock.command.ECommand;
 import net.kyori.adventure.text.minimessage.MiniMessage;
 import org.bukkit.command.CommandSender;
 
 import java.io.File;
 import java.util.Collection;
-import java.util.List;
 
-public class ListCommand extends ECommand {
+public class ListCommand {
 
     private final MCCinema plugin = MCCinema.getInstance();
     private static final MiniMessage MM = MiniMessage.miniMessage();
 
-    public ListCommand() {
-        setCommand("list");
-        setAliases("ls", "screens");
-        setPermission("mccinema.list");
-        setPlayerCommand(true);
-        setConsoleCommand(true);
-        setMinArgs(0);
-        setMaxArgs(1);
-        setHelp("/mcc list [screens|videos]");
-    }
 
-    @Override
-    public void onExecute(String[] args, CommandSender sender) {
-        String type = args.length > 1 ? args[1].toLowerCase() : "screens";
-
-        if (type.equals("videos") || type.equals("files")) {
-            listVideos(sender);
-        } else {
-            listScreens(sender);
-        }
-    }
-
-    private void listScreens(CommandSender sender) {
+    public void listScreens(CommandSender sender) {
         Collection<Screen> screens = plugin.getScreenManager().getAllScreens();
 
         if (screens.isEmpty()) {
@@ -68,7 +45,7 @@ public class ListCommand extends ECommand {
         }
     }
 
-    private void listVideos(CommandSender sender) {
+    public void listVideos(CommandSender sender) {
         File videosDir = new File(plugin.getDataFolder(), "videos");
         if (!videosDir.exists()) {
             videosDir.mkdirs();
@@ -112,14 +89,5 @@ public class ListCommand extends ECommand {
         return String.format("%.1f GB", bytes / (1024.0 * 1024 * 1024));
     }
 
-    @Override
-    public List<String> onTabComplete(CommandSender sender, String[] args) {
-        if (args.length == 2) {
-            return List.of("screens", "videos").stream()
-                .filter(s -> s.startsWith(args[1].toLowerCase()))
-                .toList();
-        }
-        return List.of();
-    }
 }
 

@@ -305,6 +305,7 @@ public class PerformanceMetrics {
     public long getLastDitheringUs() { return lastDitheringUs; }
     public long getLastUpscalingUs() { return lastUpscalingUs; }
     public long getLastTileExtractionUs() { return lastTileExtractionUs; }
+    public long getLastPacketDispatchUs() { return lastPacketDispatchUs; }
     public long getLastTotalFrameUs() { return lastTotalFrameUs; }
 
 }

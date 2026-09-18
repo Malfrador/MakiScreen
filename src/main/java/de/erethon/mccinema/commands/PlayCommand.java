@@ -7,9 +7,7 @@ import de.erethon.mccinema.download.YoutubeDownloadManager;
 import de.erethon.mccinema.resourcepack.ResourcePackManager;
 import de.erethon.mccinema.screen.Screen;
 import de.erethon.mccinema.video.FrameProcessor;
-import de.erethon.mccinema.video.VideoFileTypes;
 import de.erethon.mccinema.video.VideoPlayer;
-import de.erethon.bedrock.command.ECommand;
 import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
@@ -25,12 +23,10 @@ import org.bukkit.scheduler.BukkitTask;
 
 import java.io.File;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
@@ -40,7 +36,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.Locale;
 
-public class PlayCommand extends ECommand {
+public class PlayCommand {
 
     private final MCCinema plugin = MCCinema.getInstance();
     private static final MiniMessage MM = MiniMessage.miniMessage();
@@ -48,116 +44,26 @@ public class PlayCommand extends ECommand {
     private BukkitTask progressTask;
     private BossBar progressBar;
 
-    public PlayCommand() {
-        setCommand("play");
-        setAliases("start");
-        setPermission("mccinema.play");
-        setPlayerCommand(true);
-        setConsoleCommand(true);
-        setMinArgs(0);
-        setMaxArgs(99);
-        setHelp("/mcc play <screen> <file-or-url> [--audio [chunk_seconds|single]] [--dither <mode>] [--experimental] [players...]");
-    }
-
-    @Override
-    public void onExecute(String[] args, CommandSender sender) {
-        if (args.length < 3) {
-            sender.sendMessage(MM.deserialize("<red>Usage: /mcc play <screen> <file-or-url> [--audio [chunk_seconds|single]] [--dither <mode>] [--experimental] [players...]"));
-            return;
-        }
-
-        String screenName = args[1];
-        String fileName = args[2];
-
-        // Parse optional flags
-        boolean audioFlag = false;
-        boolean experimentalFlag = false;
-        boolean explicitDither = false;
-        boolean acceptTools = false;
-        int chunkDurationMs = AudioManager.DEFAULT_CHUNK_DURATION_MS;
-        FrameProcessor.DitheringMode ditheringMode = FrameProcessor.DitheringMode.FLOYD_STEINBERG_REDUCED; // Default
-        List<String> targetPlayerNames = new ArrayList<>();
-
-        // Parse arguments for --audio, --dither, and optional target players
-        for (int i = 3; i < args.length; i++) {
-            if (args[i].equalsIgnoreCase("--audio")) {
-                audioFlag = true;
-                // Check for chunk duration argument
-                if (i + 1 < args.length && isAudioChunkArgument(args[i + 1])) {
-                    String chunkArg = args[i + 1].toLowerCase();
-                    if (chunkArg.equals("single") || chunkArg.equals("0")) {
-                        chunkDurationMs = 0;
-                    } else {
-                        try {
-                            int seconds = Integer.parseInt(chunkArg);
-                            if (seconds < 0) {
-                                sender.sendMessage(MM.deserialize("<red>Chunk duration must be positive or 'single'"));
-                                return;
-                            }
-                            chunkDurationMs = seconds * 1000;
-                        } catch (NumberFormatException e) {
-                            sender.sendMessage(MM.deserialize("<red>Invalid chunk duration: " + chunkArg));
-                            return;
-                        }
-                    }
-                    i++; // Skip the chunk duration argument
-                }
-            } else if (args[i].equalsIgnoreCase("--accept-tools")) {
-                acceptTools = true;
-            } else if (args[i].equalsIgnoreCase("--experimental")) {
-                experimentalFlag = true;
-            } else if (args[i].equalsIgnoreCase("--dither")) {
-                explicitDither = true;
-                if (i + 1 < args.length) {
-                    String modeArg = args[i + 1].toUpperCase();
-                    try {
-                        ditheringMode = FrameProcessor.DitheringMode.valueOf(modeArg);
-                    } catch (IllegalArgumentException e) {
-                        sender.sendMessage(MM.deserialize("<red>Invalid dithering mode: " + args[i + 1]));
-                        sender.sendMessage(MM.deserialize("<gray>Available modes: floyd_steinberg, floyd_steinberg_reduced, bayer_8x8, none"));
-                        return;
-                    }
-                    i++; // Skip the mode argument
-                } else {
-                    sender.sendMessage(MM.deserialize("<red>Missing dithering mode after --dither"));
-                    return;
-                }
-            } else if (args[i].startsWith("--")) {
-                sender.sendMessage(MM.deserialize("<red>Unknown option: " + args[i]));
-                return;
-            } else {
-                targetPlayerNames.add(args[i]);
-            }
-        }
-
-        final boolean withAudio = audioFlag;
-        final boolean experimental = experimentalFlag;
-        if (experimental && explicitDither) {
-            sender.sendMessage(Component.text("--experimental uses a film codec and cannot be combined with --dither.", NamedTextColor.RED));
-            return;
-        }
+    public void onExecute(Screen screen, PlayRequest request, CommandSender sender) {
+        String screenName = screen.getName();
+        String fileName = request.source();
+        final boolean withAudio = request.withAudio();
+        final boolean experimental = request.experimental();
+        FrameProcessor.DitheringMode ditheringMode = request.ditheringMode();
         if (experimental && plugin.getResourcePackManager() == null) {
             sender.sendMessage(Component.text("Enable resourcepack.enabled before using --experimental.", NamedTextColor.RED));
             return;
         }
-        Set<UUID> targetPlayerIds = resolveTargetPlayers(targetPlayerNames, sender);
+        Set<UUID> targetPlayerIds = resolveTargetPlayers(request.targetPlayerNames(), sender);
         if (targetPlayerIds == null) {
             return;
         }
 
-        Optional<Screen> screenOpt = plugin.getScreenManager().getScreen(screenName);
-        if (screenOpt.isEmpty()) {
-            sender.sendMessage(MM.deserialize("<red>Screen '" + screenName + "' not found!"));
-            return;
-        }
-
-        Screen screen = screenOpt.get();
-
         if (isUrl(fileName)) {
-            String continuationCommand = "/mcc " + String.join(" ", args) +
-                (acceptTools ? "" : " --accept-tools");
+            String continuationCommand = "/mcc play " + screenName + " " + request.rawInput() +
+                (request.acceptTools() ? "" : " --accept-tools");
             playLivestream(sender, screen, fileName, withAudio, ditheringMode, targetPlayerIds,
-                acceptTools, continuationCommand, experimental);
+                request.acceptTools(), continuationCommand, experimental);
             return;
         }
 
@@ -181,7 +87,7 @@ public class PlayCommand extends ECommand {
         sender.sendMessage(MM.deserialize("<yellow>Loading video..."));
 
         File finalVideoFile = videoFile;
-        int finalChunkDurationMs = chunkDurationMs;
+        int finalChunkDurationMs = request.chunkDurationMs();
         FrameProcessor.DitheringMode finalDitheringMode = ditheringMode;
         Set<UUID> finalTargetPlayerIds = targetPlayerIds;
         new BukkitRunnable() {
@@ -500,54 +406,6 @@ public class PlayCommand extends ECommand {
         };
     }
 
-    @Override
-    public List<String> onTabComplete(CommandSender sender, String[] args) {
-        if (args.length == 2) {
-            return plugin.getScreenManager().getAllScreens().stream()
-                .map(Screen::getName)
-                .filter(s -> s.toLowerCase().startsWith(args[1].toLowerCase()))
-                .toList();
-        }
-
-        if (args.length == 3) {
-            File videosDir = new File(plugin.getDataFolder(), "videos");
-            if (videosDir.exists()) {
-                String[] files = videosDir.list((dir, name) -> VideoFileTypes.isSupported(name));
-                if (files != null) {
-                    return Arrays.stream(files)
-                        .filter(s -> s.toLowerCase().startsWith(args[2].toLowerCase()))
-                        .toList();
-                }
-            }
-        }
-
-        if (args.length >= 4) {
-            String prevArg = args[args.length - 2];
-            String currentArg = args[args.length - 1];
-
-            if (prevArg.equalsIgnoreCase("--audio")) {
-                return filterCompletions(currentArg, combinedCompletions(
-                    List.of("single", "5", "10", "15", "30", "60"),
-                    onlinePlayerNames()
-                ));
-            }
-
-            if (prevArg.equalsIgnoreCase("--dither")) {
-                return Arrays.stream(FrameProcessor.DitheringMode.values())
-                    .map(Enum::name)
-                    .filter(s -> s.toLowerCase().startsWith(args[args.length - 1].toLowerCase()))
-                    .toList();
-            }
-
-            return filterCompletions(currentArg, combinedCompletions(
-                List.of("--audio", "--dither", "--experimental"),
-                onlinePlayerNames()
-            ));
-        }
-
-        return List.of();
-    }
-
     private void playLivestream(CommandSender sender, Screen screen, String sourceUrl, boolean requestedAudio,
                                 FrameProcessor.DitheringMode ditheringMode, Set<UUID> targetPlayerIds,
                                 boolean acceptTools, String continuationCommand, boolean experimental) {
@@ -680,19 +538,6 @@ public class PlayCommand extends ECommand {
         return MM.escapeTags(value == null ? "Unknown media error" : value);
     }
 
-    private boolean isAudioChunkArgument(String value) {
-        String lower = value.toLowerCase(Locale.ROOT);
-        if (lower.equals("single") || lower.equals("0")) {
-            return true;
-        }
-        try {
-            Integer.parseInt(lower);
-            return true;
-        } catch (NumberFormatException ignored) {
-            return false;
-        }
-    }
-
     private Set<UUID> resolveTargetPlayers(List<String> names, CommandSender sender) {
         if (names.isEmpty()) {
             return Set.of();
@@ -728,25 +573,5 @@ public class PlayCommand extends ECommand {
         return "\n<gray>  Viewers: <white>" + player.getPlaybackViewers().size() + " selected";
     }
 
-    private List<String> onlinePlayerNames() {
-        return Bukkit.getOnlinePlayers().stream()
-            .map(Player::getName)
-            .sorted(String.CASE_INSENSITIVE_ORDER)
-            .toList();
-    }
-
-    private List<String> combinedCompletions(List<String> first, List<String> second) {
-        List<String> completions = new ArrayList<>(first.size() + second.size());
-        completions.addAll(first);
-        completions.addAll(second);
-        return completions;
-    }
-
-    private List<String> filterCompletions(String currentArg, List<String> completions) {
-        String lower = currentArg.toLowerCase(Locale.ROOT);
-        return completions.stream()
-            .filter(value -> value.toLowerCase(Locale.ROOT).startsWith(lower))
-            .toList();
-    }
 }
 

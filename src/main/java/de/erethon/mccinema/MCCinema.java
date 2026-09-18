@@ -1,6 +1,6 @@
 package de.erethon.mccinema;
 
-import de.erethon.mccinema.commands.MCommandCache;
+import de.erethon.mccinema.commands.MCCCommandBrigadier;
 import de.erethon.mccinema.dither.DitherLookupUtil;
 import de.erethon.mccinema.download.YoutubeDownloadManager;
 import de.erethon.mccinema.resourcepack.ResourcePackManager;
@@ -13,6 +13,7 @@ import de.erethon.mccinema.video.VideoTransformManager;
 import de.erethon.bedrock.compatibility.Internals;
 import de.erethon.bedrock.plugin.EPlugin;
 import de.erethon.bedrock.plugin.EPluginSettings;
+import io.papermc.paper.plugin.lifecycle.event.types.LifecycleEvents;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
@@ -32,8 +33,6 @@ public final class MCCinema extends EPlugin implements Listener {
 
     private final Logger logger = getLogger();
     private static MCCinema instance;
-    private MCommandCache commands;
-
     private ScreenManager screenManager;
     private ResourcePackManager resourcePackManager;
     private YoutubeDownloadManager youtubeDownloadManager;
@@ -44,10 +43,19 @@ public final class MCCinema extends EPlugin implements Listener {
     private final Map<UUID, VideoPlayer> videoPlayers = new ConcurrentHashMap<>();
 
     public MCCinema() {
+        instance = this;
         settings = EPluginSettings.builder()
                 .internals(Internals.NEW)
                 .economy(false)
                 .build();
+    }
+
+    @Override
+    public void onLoad() {
+        super.onLoad();
+        getLifecycleManager().registerEventHandler(LifecycleEvents.COMMANDS.newHandler(event ->
+            MCCCommandBrigadier.register(event.registrar())
+        ));
     }
 
     @Override
@@ -111,9 +119,6 @@ public final class MCCinema extends EPlugin implements Listener {
             logger.info("Resource pack hosting is disabled in config");
         }
 
-        commands = new MCommandCache(this);
-        commands.register(this);
-        setCommandCache(commands);
         getServer().getPluginManager().registerEvents(this, this);
         resourcePackListener = new ResourcePackListener(this);
         getServer().getPluginManager().registerEvents(resourcePackListener, this);

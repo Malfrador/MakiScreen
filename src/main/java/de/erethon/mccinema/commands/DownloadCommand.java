@@ -5,7 +5,6 @@ import de.erethon.mccinema.download.DownloadProgressCallback;
 import de.erethon.mccinema.download.DownloadTask;
 import de.erethon.mccinema.download.YoutubeDownloadManager;
 import de.erethon.mccinema.download.YoutubeDownloadManager.VideoInfo;
-import de.erethon.bedrock.command.ECommand;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.format.NamedTextColor;
@@ -16,63 +15,15 @@ import org.bukkit.scheduler.BukkitRunnable;
 
 import java.io.File;
 
-public class DownloadCommand extends ECommand {
+public class DownloadCommand {
 
     private final MCCinema plugin = MCCinema.getInstance();
     private static final MiniMessage MM = MiniMessage.miniMessage();
 
-    public DownloadCommand() {
-        setCommand("download");
-        setAliases("dl");
-        setPermission("mccinema.download");
-        setPlayerCommand(true);
-        setConsoleCommand(true);
-        setMinArgs(1);
-        setMaxArgs(99);
-        setHelp("/mccinema download <youtube-url|video-id> [filename] [--no-convert]");
-    }
-
-    @Override
-    public void onExecute(String[] args, CommandSender sender) {
-        if (args.length < 2) {
-            sender.sendMessage(MM.deserialize("<red>Usage: /mcc download <youtube-url|video-id> [filename] [--no-convert]"));
-            sender.sendMessage(MM.deserialize("<gray>Examples:"));
-            sender.sendMessage(MM.deserialize("<gray>  /mccinema download dQw4w9WgXcQ"));
-            sender.sendMessage(MM.deserialize("<gray>  /mccinema download https://www.youtube.com/watch?v=dQw4w9WgXcQ"));
-            sender.sendMessage(MM.deserialize("<gray>  /mccinema download dQw4w9WgXcQ my_video"));
-            sender.sendMessage(MM.deserialize("<gray>  /mccinema download dQw4w9WgXcQ my_video --no-convert"));
-            sender.sendMessage(MM.deserialize(""));
-            sender.sendMessage(MM.deserialize("<yellow>Options:"));
-            sender.sendMessage(MM.deserialize("<gray>  --no-convert  <white>Skip FPS conversion (keep original framerate)"));
-            return;
-        }
-
-        String videoIdOrUrl = null;
-        String customName = null;
-        boolean convertFps = plugin.getConfig().getBoolean("youtube.auto-convert-fps", true);
-        boolean acceptConsent = false;
-
-        // Parse arguments - flags can appear at any position
-        for (int i = 1; i < args.length; i++) {
-            if (args[i].equalsIgnoreCase("--no-convert")) {
-                convertFps = false;
-            } else if (args[i].equalsIgnoreCase("--accept") || args[i].equalsIgnoreCase("--accept-tools")) {
-                acceptConsent = true;
-            } else if (videoIdOrUrl == null) {
-                videoIdOrUrl = args[i];
-            } else if (customName == null) {
-                customName = args[i];
-            }
-        }
-
-        if (videoIdOrUrl == null) {
-            sender.sendMessage(MM.deserialize("<red>Usage: /mcc download <youtube-url|video-id> [filename] [--no-convert]"));
-            return;
-        }
-
+    public void onExecute(DownloadRequest request, CommandSender sender) {
         YoutubeDownloadManager downloadManager = plugin.getYoutubeDownloadManager();
 
-        if (acceptConsent) {
+        if (request.acceptTools()) {
             downloadManager.saveUserConsent(true);
         }
 
@@ -80,8 +31,9 @@ public class DownloadCommand extends ECommand {
             sender.sendMessage(MM.deserialize("<yellow>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
             sender.sendMessage(MM.deserialize("<gold><bold>One-time media setup"));
             sender.sendMessage(MM.deserialize("<gray>MCCinema will download verified, self-contained yt-dlp and Deno tools from their official GitHub releases."));
-            String command = "/mcc download --accept-tools " + videoIdOrUrl +
-                (customName != null ? " " + customName : "") + (convertFps ? "" : " --no-convert");
+            String command = "/mcc download --accept-tools " + request.source() +
+                (request.customName() != null ? " " + request.customName() : "") +
+                (request.convertFps() ? "" : " --no-convert");
             sender.sendMessage(Component.text("[INSTALL AND CONTINUE]", NamedTextColor.GREEN, TextDecoration.BOLD)
                 .clickEvent(ClickEvent.runCommand(command)));
             sender.sendMessage(MM.deserialize("<gray>Console: <white>" + escape(command)));
@@ -89,9 +41,9 @@ public class DownloadCommand extends ECommand {
             return;
         }
 
-        final String requestedUrl = videoIdOrUrl;
-        final String requestedName = customName;
-        final boolean requestedConversion = convertFps;
+        final String requestedUrl = request.source();
+        final String requestedName = request.customName();
+        final boolean requestedConversion = request.convertFps();
         if (downloadManager.isReady()) {
             startDownload(sender, downloadManager, requestedUrl, requestedName, requestedConversion);
             return;

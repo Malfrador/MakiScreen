@@ -4,6 +4,7 @@ import de.erethon.mccinema.MCCinema;
 import de.erethon.mccinema.screen.MapTile;
 import de.erethon.mccinema.screen.Screen;
 import net.minecraft.network.protocol.Packet;
+import net.minecraft.network.protocol.BundlerInfo;
 import net.minecraft.network.protocol.game.ClientboundBundlePacket;
 import net.minecraft.network.protocol.game.ClientboundMapItemDataPacket;
 import net.minecraft.network.protocol.game.ClientGamePacketListener;
@@ -37,6 +38,7 @@ public class PacketDispatcher {
 
     // Maximum bytes to send per frame
     private static final int DEFAULT_MAX_BYTES_PER_FRAME = 10 * 1024 * 1024; // 10 MB
+    private static final int MAX_PACKETS_PER_BUNDLE = BundlerInfo.BUNDLE_SIZE_LIMIT;
 
     // Target packets per second
     private static final int TARGET_PACKETS_PER_SECOND = 1800;
@@ -209,6 +211,9 @@ public class PacketDispatcher {
         allUpdates.addAll(updates);
         allUpdates.addAll(deferredUpdates);
         deferredUpdates.clear();
+        long dirtyTileCount = allUpdates.stream().filter(update -> update.dirtyRegion() != null).count();
+        int maxRegionsPerTile = Math.max(1,
+            MAX_PACKETS_PER_BUNDLE / Math.max(1, (int) Math.min(Integer.MAX_VALUE, dirtyTileCount)));
 
         boolean highMotionFrame = contentStats != null && contentStats.motionScore() >= adaptiveMotionThreshold;
         boolean flatFrame = contentStats != null && contentStats.motionScore() < adaptiveMotionThreshold &&
@@ -222,7 +227,8 @@ public class PacketDispatcher {
                 continue;
             }
 
-            PreparedUpdate prepared = prepareUpdate(update, effectiveFullUpdateThreshold, effectiveMinPatchArea);
+            PreparedUpdate prepared = prepareUpdate(update, effectiveFullUpdateThreshold,
+                effectiveMinPatchArea, maxRegionsPerTile);
             if (prepared == null || prepared.regions().isEmpty()) {
                 continue;
             }
@@ -296,7 +302,7 @@ public class PacketDispatcher {
         }
         lastFrameByteCap.set(effectiveMaxBytes);
         int effectiveMaxPackets = useBundlePackets
-            ? Integer.MAX_VALUE
+            ? MAX_PACKETS_PER_BUNDLE
             : (isSceneChange || sceneChangeFramesRemaining > 0
                 ? (int) (adaptiveMaxPacketsPerFrame * 1.3)
                 : adaptiveMaxPacketsPerFrame);
@@ -423,7 +429,13 @@ public class PacketDispatcher {
             update.tile().resetFramesSinceLastSend();
             update.tile().resetAccumulatedChanges();
             if (update.mapData() != null) {
-                update.tile().setLastSentData(update.mapData().clone());
+                if (experimentalFilm) {
+                    // Film planning covers every changed byte. Encoded arrays are immutable
+                    // after publication, so the complete snapshot is also the exact sent state.
+                    update.tile().setLastSentData(update.mapData());
+                } else {
+                    applySentRegions(update.tile(), update.mapData(), sentUpdate.regions());
+                }
             }
         }
 
@@ -486,17 +498,23 @@ public class PacketDispatcher {
         }
     }
 
-    private PreparedUpdate prepareUpdate(TileUpdate update, int effectiveFullUpdateThreshold, int effectiveMinPatchArea) {
+    private PreparedUpdate prepareUpdate(TileUpdate update, int effectiveFullUpdateThreshold,
+                                         int effectiveMinPatchArea, int bundleRegionLimit) {
         MapTile.DirtyRegion dirtyRegion = update.dirtyRegion();
         if (dirtyRegion == null) {
             return null;
         }
 
         byte[] mapData = update.mapData();
-        // Encoded bytes are not colours: never discard small components or replace
-        // the compact payload with a full map based on visual-density heuristics.
+        // Film bytes describe matching 4x4 image blocks. Preserve that locality
+        // with exact block patches rather than collapsing all changes into one box.
         if (experimentalFilm) {
-            return new PreparedUpdate(update, List.of(dirtyRegion), dirtyRegion.getDataSize(), dirtyRegion.getDataSize());
+            List<MapTile.DirtyRegion> regions = de.erethon.mccinema.video.film.FilmPatchPlanner.plan(
+                mapData, update.tile().getLastSentData(), dirtyRegion,
+                bundleRegionLimit, Math.max(12, patchPacketOverheadBytes));
+            int bytes = 0;
+            for (MapTile.DirtyRegion region : regions) bytes += region.getDataSize();
+            return new PreparedUpdate(update, regions, bytes, dirtyRegion.getDataSize());
         }
         if (mapData == null || mapData.length != MapTile.TOTAL_PIXELS) {
             return new PreparedUpdate(update, List.of(dirtyRegion), dirtyRegion.getDataSize(), dirtyRegion.getDataSize());
@@ -511,7 +529,8 @@ public class PacketDispatcher {
             return new PreparedUpdate(update, List.of(dirtyRegion), dirtyRegion.getDataSize(), dirtyRegion.getDataSize());
         }
 
-        List<MapTile.DirtyRegion> splitRegions = buildMultiRegions(update, effectiveMinPatchArea);
+        List<MapTile.DirtyRegion> splitRegions = buildMultiRegions(update, multiRegionBlockSize,
+            effectiveMinPatchArea, Math.min(bundleRegionLimit, maxPatchesPerTile));
         if (splitRegions.isEmpty()) {
             return new PreparedUpdate(update, List.of(dirtyRegion), dirtyRegion.getDataSize(), dirtyRegion.getDataSize());
         }
@@ -531,24 +550,44 @@ public class PacketDispatcher {
         return new PreparedUpdate(update, splitRegions, splitPayload, dirtyRegion.getDataSize());
     }
 
-    private List<MapTile.DirtyRegion> buildMultiRegions(TileUpdate update, int effectiveMinPatchArea) {
+    private void applySentRegions(MapTile tile, byte[] mapData, List<MapTile.DirtyRegion> regions) {
+        byte[] baseline = tile.getLastSentData();
+        if (baseline == null || baseline.length != MapTile.TOTAL_PIXELS) {
+            baseline = new byte[MapTile.TOTAL_PIXELS];
+            tile.setLastSentData(baseline);
+        }
+        for (MapTile.DirtyRegion region : regions) {
+            for (int row = 0; row < region.height(); row++) {
+                int source = (region.y() + row) * MapTile.SIZE + region.x();
+                System.arraycopy(mapData, source, baseline, source, region.width());
+            }
+        }
+    }
+
+    private List<MapTile.DirtyRegion> buildMultiRegions(TileUpdate update, int blockSize,
+                                                        int effectiveMinPatchArea, int patchLimit) {
         byte[] mapData = update.mapData();
         byte[] lastSentData = update.tile().getLastSentData();
         if (mapData == null || lastSentData == null || lastSentData.length != MapTile.TOTAL_PIXELS) {
             return List.of();
         }
 
-        int blockSize = Math.max(1, multiRegionBlockSize);
+        blockSize = Math.max(1, blockSize);
         int blockColumns = (MapTile.SIZE + blockSize - 1) / blockSize;
         int blockRows = (MapTile.SIZE + blockSize - 1) / blockSize;
         int blockCount = blockColumns * blockRows;
 
         boolean[] dirtyBlocks = new boolean[blockCount];
         int[] changedPerBlock = new int[blockCount];
-        for (int y = 0; y < MapTile.SIZE; y++) {
+        MapTile.DirtyRegion bounding = update.dirtyRegion();
+        int startY = Math.max(0, bounding.y());
+        int endY = Math.min(MapTile.SIZE, bounding.y() + bounding.height());
+        int startX = Math.max(0, bounding.x());
+        int endX = Math.min(MapTile.SIZE, bounding.x() + bounding.width());
+        for (int y = startY; y < endY; y++) {
             int rowOffset = y * MapTile.SIZE;
             int blockY = y / blockSize;
-            for (int x = 0; x < MapTile.SIZE; x++) {
+            for (int x = startX; x < endX; x++) {
                 int index = rowOffset + x;
                 if (mapData[index] != lastSentData[index]) {
                     int blockX = x / blockSize;
@@ -559,86 +598,75 @@ public class PacketDispatcher {
             }
         }
 
-        List<MapTile.DirtyRegion> regions = new ArrayList<>();
-        boolean[] visited = new boolean[blockCount];
-        int[] queue = new int[blockCount];
-
-        for (int blockIndex = 0; blockIndex < blockCount; blockIndex++) {
-            if (!dirtyBlocks[blockIndex] || visited[blockIndex]) {
-                continue;
+        List<PatchBounds> rectangles = new ArrayList<>();
+        java.util.Map<Long, PatchBounds> active = new java.util.HashMap<>();
+        int firstBlockY = startY / blockSize;
+        int lastBlockY = (endY + blockSize - 1) / blockSize;
+        int firstBlockX = startX / blockSize;
+        int lastBlockX = (endX + blockSize - 1) / blockSize;
+        for (int blockY = firstBlockY; blockY < lastBlockY; blockY++) {
+            java.util.Map<Long, PatchBounds> next = new java.util.HashMap<>();
+            int blockX = firstBlockX;
+            while (blockX < lastBlockX) {
+                int index = blockY * blockColumns + blockX;
+                if (!dirtyBlocks[index]) {
+                    blockX++;
+                    continue;
+                }
+                int runStartX = blockX;
+                int changed = 0;
+                while (blockX < lastBlockX && dirtyBlocks[blockY * blockColumns + blockX]) {
+                    changed += changedPerBlock[blockY * blockColumns + blockX];
+                    blockX++;
+                }
+                int runEndX = blockX;
+                long key = ((long) runStartX << 32) | (runEndX & 0xffffffffL);
+                PatchBounds rectangle = active.get(key);
+                if (rectangle == null) {
+                    rectangle = new PatchBounds(runStartX, blockY, runEndX - runStartX, changed);
+                    rectangles.add(rectangle);
+                } else {
+                    rectangle.heightBlocks++;
+                    rectangle.changedPixels += changed;
+                }
+                next.put(key, rectangle);
             }
-
-            int queueStart = 0;
-            int queueEnd = 0;
-            queue[queueEnd++] = blockIndex;
-            visited[blockIndex] = true;
-
-            int minBlockX = Integer.MAX_VALUE;
-            int minBlockY = Integer.MAX_VALUE;
-            int maxBlockX = Integer.MIN_VALUE;
-            int maxBlockY = Integer.MIN_VALUE;
-            int changedPixels = 0;
-
-            while (queueStart < queueEnd) {
-                int current = queue[queueStart++];
-                int currentY = current / blockColumns;
-                int currentX = current % blockColumns;
-
-                minBlockX = Math.min(minBlockX, currentX);
-                maxBlockX = Math.max(maxBlockX, currentX);
-                minBlockY = Math.min(minBlockY, currentY);
-                maxBlockY = Math.max(maxBlockY, currentY);
-                changedPixels += changedPerBlock[current];
-
-                if (currentX > 0) {
-                    int left = current - 1;
-                    if (dirtyBlocks[left] && !visited[left]) {
-                        visited[left] = true;
-                        queue[queueEnd++] = left;
-                    }
-                }
-                if (currentX + 1 < blockColumns) {
-                    int right = current + 1;
-                    if (dirtyBlocks[right] && !visited[right]) {
-                        visited[right] = true;
-                        queue[queueEnd++] = right;
-                    }
-                }
-                if (currentY > 0) {
-                    int up = current - blockColumns;
-                    if (dirtyBlocks[up] && !visited[up]) {
-                        visited[up] = true;
-                        queue[queueEnd++] = up;
-                    }
-                }
-                if (currentY + 1 < blockRows) {
-                    int down = current + blockColumns;
-                    if (dirtyBlocks[down] && !visited[down]) {
-                        visited[down] = true;
-                        queue[queueEnd++] = down;
-                    }
-                }
-            }
-
-            int x = minBlockX * blockSize;
-            int y = minBlockY * blockSize;
-            int width = Math.min(MapTile.SIZE, (maxBlockX + 1) * blockSize) - x;
-            int height = Math.min(MapTile.SIZE, (maxBlockY + 1) * blockSize) - y;
-            int area = width * height;
-            if (area < effectiveMinPatchArea) {
-                continue;
-            }
-
-            byte[] patchData = copyPatchData(mapData, x, y, width, height);
-            regions.add(new MapTile.DirtyRegion(x, y, width, height, patchData, Math.max(1, changedPixels)));
+            active = next;
         }
 
-        if (regions.size() > maxPatchesPerTile) {
+        List<MapTile.DirtyRegion> regions = new ArrayList<>(rectangles.size());
+        for (PatchBounds rectangle : rectangles) {
+            int x = rectangle.xBlock * blockSize;
+            int y = rectangle.yBlock * blockSize;
+            int width = Math.min(MapTile.SIZE, (rectangle.xBlock + rectangle.widthBlocks) * blockSize) - x;
+            int height = Math.min(MapTile.SIZE, (rectangle.yBlock + rectangle.heightBlocks) * blockSize) - y;
+            if (width * height < effectiveMinPatchArea) continue;
+            byte[] patchData = copyPatchData(mapData, x, y, width, height);
+            regions.add(new MapTile.DirtyRegion(x, y, width, height, patchData,
+                Math.max(1, rectangle.changedPixels)));
+        }
+
+        if (regions.size() > patchLimit) {
             return List.of();
         }
 
         regions.sort((a, b) -> Integer.compare(b.getDataSize(), a.getDataSize()));
         return regions;
+    }
+
+    private static final class PatchBounds {
+        private final int xBlock;
+        private final int yBlock;
+        private final int widthBlocks;
+        private int heightBlocks = 1;
+        private int changedPixels;
+
+        private PatchBounds(int xBlock, int yBlock, int widthBlocks, int changedPixels) {
+            this.xBlock = xBlock;
+            this.yBlock = yBlock;
+            this.widthBlocks = widthBlocks;
+            this.changedPixels = changedPixels;
+        }
     }
 
     private byte[] copyPatchData(byte[] fullMapData, int x, int y, int width, int height) {
@@ -809,6 +837,10 @@ public class PacketDispatcher {
         ServerGamePacketListenerImpl connection = ((CraftPlayer) player).getHandle().connection;
 
         if (useBundlePackets && packets.size() > 1) {
+            if (packets.size() > MAX_PACKETS_PER_BUNDLE) {
+                throw new IllegalStateException("Frame contains " + packets.size()
+                    + " map packets, exceeding the atomic bundle limit of " + MAX_PACKETS_PER_BUNDLE);
+            }
             // Bundle all map packets into a single bundle packet
             List<Packet<? super ClientGamePacketListener>> packetList = new ArrayList<>(packets);
             ClientboundBundlePacket bundlePacket = new ClientboundBundlePacket(packetList);

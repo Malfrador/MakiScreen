@@ -5,14 +5,12 @@ import de.erethon.mccinema.screen.AspectRatio;
 import de.erethon.mccinema.screen.MapTile;
 import de.erethon.mccinema.screen.Screen;
 import de.erethon.mccinema.screen.ScreenMapRenderer;
-import de.erethon.bedrock.command.ECommand;
 import net.kyori.adventure.text.minimessage.MiniMessage;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.Rotation;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
-import org.bukkit.command.CommandSender;
 import org.bukkit.entity.ItemFrame;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
@@ -21,60 +19,32 @@ import org.bukkit.map.MapRenderer;
 import org.bukkit.map.MapView;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
-public class ScreenCreateCommand extends ECommand {
+public class ScreenCreateCommand {
 
     private final MCCinema plugin = MCCinema.getInstance();
     private static final MiniMessage MM = MiniMessage.miniMessage();
 
-    public ScreenCreateCommand() {
-        setCommand("create");
-        setAliases("new", "add");
-        setPermission("mccinema.create");
-        setPlayerCommand(true);
-        setConsoleCommand(false);
-        setMinArgs(1);
-        setMaxArgs(99);
-        setHelp("/mcc create <name> [aspect] [width] [height]");
+
+    public void onExecute(Player player, String name) {
+        onExecute(player, name, AspectRatio.RATIO_16_9, 8, 5);
     }
 
-    @Override
-    public void onExecute(String[] args, CommandSender sender) {
-        Player player = (Player) sender;
+    public void onExecute(Player player, String name, AspectRatio aspectRatio) {
+        if (aspectRatio == AspectRatio.CUSTOM) {
+            player.sendMessage(MM.deserialize("<red>CUSTOM requires explicit width and height."));
+            return;
+        }
+        int[] dimensions = aspectRatio.calculateMapDimensions(64);
+        onExecute(player, name, aspectRatio, dimensions[0], dimensions[1]);
+    }
 
-        String name = args[1];
+    public void onExecute(Player player, String name, AspectRatio aspectRatio, int mapWidth, int mapHeight) {
 
         if (plugin.getScreenManager().screenExists(name)) {
             player.sendMessage(MM.deserialize("<red>A screen with that name already exists!"));
             return;
-        }
-
-        AspectRatio aspectRatio = AspectRatio.RATIO_16_9;
-        int mapWidth = 8;
-        int mapHeight = 5;
-
-        if (args.length >= 3) {
-            aspectRatio = AspectRatio.fromString(args[2]);
-            int[] dims = aspectRatio.calculateMapDimensions(64);
-            mapWidth = dims[0];
-            mapHeight = dims[1];
-        }
-
-        if (args.length >= 5) {
-            try {
-                mapWidth = Integer.parseInt(args[3]);
-                mapHeight = Integer.parseInt(args[4]);
-
-                if (mapWidth < 1 || mapWidth > 64 || mapHeight < 1 || mapHeight > 32) {
-                    player.sendMessage(MM.deserialize("<red>Invalid dimensions! Width: 1-64, Height: 1-32"));
-                    return;
-                }
-            } catch (NumberFormatException e) {
-                player.sendMessage(MM.deserialize("<red>Invalid dimensions! Use numbers."));
-                return;
-            }
         }
 
         // Determine placement direction from player's facing
@@ -207,37 +177,5 @@ public class ScreenCreateCommand extends ECommand {
         };
     }
 
-    @Override
-    public List<String> onTabComplete(CommandSender sender, String[] args) {
-        // args[0] = "create", args[1] = name, args[2] = aspect, args[3] = width, args[4] = height
-        if (args.length == 3) {
-            return Arrays.stream(AspectRatio.values())
-                .map(AspectRatio::name)
-                .filter(s -> s.toLowerCase().startsWith(args[2].toLowerCase()))
-                .toList();
-        }
-        if (args.length == 4) {
-            return List.of("<width>");
-        }
-        if (args.length == 5) {
-            AspectRatio aspectRatio = AspectRatio.fromString(args[2]);
-            if (aspectRatio == AspectRatio.CUSTOM) {
-                return List.of("<height>");
-            }
-            try {
-                int width = Integer.parseInt(args[3]);
-                if (width < 1 || width > 64) {
-                    return List.of();
-                }
-                String suggestedHeight = String.valueOf(aspectRatio.calculateHeight(width));
-                return suggestedHeight.startsWith(args[4])
-                    ? List.of(suggestedHeight)
-                    : List.of();
-            } catch (NumberFormatException ignored) {
-                return List.of();
-            }
-        }
-        return List.of();
-    }
 }
 

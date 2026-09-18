@@ -1,67 +1,20 @@
 package de.erethon.mccinema.commands;
 
-import de.erethon.bedrock.command.ECommand;
 import de.erethon.mccinema.MCCinema;
 import de.erethon.mccinema.screen.Screen;
 import de.erethon.mccinema.video.VideoTransformEditor;
 import net.kyori.adventure.text.minimessage.MiniMessage;
-import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 
-import java.util.List;
-import java.util.Optional;
-
-public final class CropCommand extends ECommand {
+public final class CropCommand {
 
     private static final MiniMessage MM = MiniMessage.miniMessage();
     private final MCCinema plugin = MCCinema.getInstance();
 
-    public CropCommand() {
-        setCommand("crop");
-        setAliases("zoom", "viewport");
-        setPermission("mccinema.crop");
-        setPlayerCommand(true);
-        setConsoleCommand(false);
-        setMinArgs(0);
-        setMaxArgs(1);
-        setHelp("/mcc crop <screen|save|reset|cancel>");
-    }
 
-    @Override
-    public void onExecute(String[] args, CommandSender sender) {
-        Player player = (Player) sender;
+    public void start(Player player, Screen screen) {
         VideoTransformEditor editor = plugin.getVideoTransformEditor();
-        if (args.length < 2) {
-            player.sendMessage(MM.deserialize("<red>Usage: /mcc crop <screen|save|reset|cancel>"));
-            return;
-        }
-
-        String argument = args[1];
-        if (argument.equalsIgnoreCase("save")) {
-            if (!editor.save(player)) {
-                notEditing(player);
-            }
-            return;
-        }
-        if (argument.equalsIgnoreCase("reset")) {
-            if (!editor.reset(player)) {
-                notEditing(player);
-            }
-            return;
-        }
-        if (argument.equalsIgnoreCase("cancel")) {
-            if (!editor.cancel(player, true)) {
-                notEditing(player);
-            }
-            return;
-        }
-        Optional<Screen> screen = plugin.getScreenManager().getScreen(argument);
-        if (screen.isEmpty()) {
-            player.sendMessage(MM.deserialize("<red>Screen '<white>" + MM.escapeTags(argument) + "</white>' not found."));
-            return;
-        }
-
-        VideoTransformEditor.StartResult result = editor.start(player, screen.get());
+        VideoTransformEditor.StartResult result = editor.start(player, screen);
         switch (result) {
             case STARTED -> {
             }
@@ -75,15 +28,22 @@ public final class CropCommand extends ECommand {
         }
     }
 
-    @Override
-    public List<String> onTabComplete(CommandSender sender, String[] args) {
-        if (args.length == 2) {
-            String prefix = args[1].toLowerCase();
-            return List.of("save", "reset", "cancel").stream()
-                .filter(option -> option.startsWith(prefix))
-                .toList();
+    public void save(Player player) {
+        if (!plugin.getVideoTransformEditor().save(player)) {
+            notEditing(player);
         }
-        return List.of();
+    }
+
+    public void reset(Player player) {
+        if (!plugin.getVideoTransformEditor().reset(player)) {
+            notEditing(player);
+        }
+    }
+
+    public void cancel(Player player) {
+        if (!plugin.getVideoTransformEditor().cancel(player, true)) {
+            notEditing(player);
+        }
     }
 
     private void notEditing(Player player) {

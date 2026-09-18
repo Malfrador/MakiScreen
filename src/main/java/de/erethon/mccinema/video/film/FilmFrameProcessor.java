@@ -58,7 +58,8 @@ public final class FilmFrameProcessor {
 
     private static void encodeTile(MapTile tile, int[] pixels, int width,
                                    PacketDispatcher.TileUpdate[] updates, byte[][] full, int index) {
-        byte[] data = FilmCodec.encodeTile(pixels, width, tile.getPixelOffsetX(), tile.getPixelOffsetY());
+        byte[] data = FilmCodec.encodeTile(pixels, width, tile.getPixelOffsetX(), tile.getPixelOffsetY(),
+            tile.getLastFrameData());
         full[tile.getTileIndex()] = data;
         updates[index] = new PacketDispatcher.TileUpdate(tile, tile.calculateDirtyRegionFromSent(data, true), data);
         tile.setLastFrameData(data);

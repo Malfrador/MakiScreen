@@ -5,7 +5,6 @@ import de.erethon.mccinema.screen.Screen;
 import de.erethon.mccinema.video.FrameProcessor;
 import de.erethon.mccinema.video.PacketDispatcher;
 import de.erethon.mccinema.video.VideoPlayer;
-import de.erethon.bedrock.command.ECommand;
 import net.kyori.adventure.text.minimessage.MiniMessage;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
@@ -13,23 +12,12 @@ import org.bukkit.entity.Player;
 import java.util.Optional;
 import java.util.UUID;
 
-public class DebugCommand extends ECommand {
+public class DebugCommand {
 
     private final MCCinema plugin = MCCinema.getInstance();
     private static final MiniMessage MM = MiniMessage.miniMessage();
 
-    public DebugCommand() {
-        setCommand("debug");
-        setAliases("metrics", "perf");
-        setPermission("mccinema.debug");
-        setPlayerCommand(true);
-        setConsoleCommand(false);
-        setMinArgs(0);
-        setMaxArgs(4);
-        setHelp("/mcc debug <screen> [setting] [value]");
-    }
 
-    @Override
     public void onExecute(String[] args, CommandSender sender) {
         if (!(sender instanceof Player player)) {
             sender.sendMessage(MM.deserialize("<red>This command can only be used by players!"));

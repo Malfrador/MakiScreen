@@ -1,6 +1,5 @@
 package de.erethon.mccinema.commands;
 
-import de.erethon.bedrock.command.ECommand;
 import de.erethon.mccinema.MCCinema;
 import de.erethon.mccinema.screen.Screen;
 import de.erethon.mccinema.video.FrameProcessor;
@@ -9,55 +8,17 @@ import de.erethon.mccinema.video.VideoPlayer;
 import net.kyori.adventure.text.minimessage.MiniMessage;
 import org.bukkit.command.CommandSender;
 
-import java.util.List;
 import java.util.Locale;
-import java.util.Optional;
 
-public class QualityCommand extends ECommand {
+public class QualityCommand {
 
     private static final MiniMessage MM = MiniMessage.miniMessage();
     private final MCCinema plugin = MCCinema.getInstance();
 
-    public QualityCommand() {
-        setCommand("quality");
-        setAliases("preset", "q");
-        setPermission("mccinema.debug");
-        setPlayerCommand(true);
-        setConsoleCommand(true);
-        setMinArgs(0);
-        setMaxArgs(3);
-        setHelp("/mcc quality <screen> [quality|balanced|performance|show]");
-    }
 
-    @Override
-    public void onExecute(String[] args, CommandSender sender) {
-        if (args.length < 2) {
-            sender.sendMessage(MM.deserialize("<red>Usage: /mcc quality <screen> [quality|balanced|performance|show]"));
-            return;
-        }
-
-        String screenName = args[1];
-        Optional<Screen> screenOpt = plugin.getScreenManager().getScreen(screenName);
-        if (screenOpt.isEmpty()) {
-            sender.sendMessage(MM.deserialize("<red>Screen '<white>" + screenName + "</white>' not found."));
-            return;
-        }
-
-        Screen screen = screenOpt.get();
+    public void apply(CommandSender sender, Screen screen, QualityPreset preset) {
         VideoPlayer videoPlayer = plugin.getVideoPlayer(screen);
-
-        if (args.length == 2 || args[2].equalsIgnoreCase("show") || args[2].equalsIgnoreCase("status")) {
-            showCurrentSettings(sender, videoPlayer, screen);
-            return;
-        }
-
-        QualityPreset preset = QualityPreset.fromInput(args[2]);
-        if (preset == null) {
-            sender.sendMessage(MM.deserialize("<red>Unknown preset: <white>" + args[2] + "</white>"));
-            sender.sendMessage(MM.deserialize("<gray>Available: quality, balanced, performance"));
-            return;
-        }
-
+        String screenName = screen.getName();
         screen.setQualityPreset(preset.name());
         plugin.getScreenManager().saveScreens();
 
@@ -69,6 +30,10 @@ public class QualityCommand extends ECommand {
             sender.sendMessage(MM.deserialize("<gray>It will be applied the next time playback starts."));
         }
         showCurrentSettings(sender, videoPlayer, screen);
+    }
+
+    public void show(CommandSender sender, Screen screen) {
+        showCurrentSettings(sender, plugin.getVideoPlayer(screen), screen);
     }
 
     public static void applyBalancedPreset(VideoPlayer videoPlayer) {
@@ -177,25 +142,7 @@ public class QualityCommand extends ECommand {
         return String.format("%.1fMB", bytes / (1024.0 * 1024.0));
     }
 
-    @Override
-    public List<String> onTabComplete(CommandSender sender, String[] args) {
-        if (args.length == 2) {
-            return plugin.getScreenManager().getAllScreens().stream()
-                .map(Screen::getName)
-                .filter(s -> s.toLowerCase(Locale.ROOT).startsWith(args[1].toLowerCase(Locale.ROOT)))
-                .toList();
-        }
-
-        if (args.length == 3) {
-            return List.of("quality", "balanced", "performance", "show", "status").stream()
-                .filter(s -> s.startsWith(args[2].toLowerCase(Locale.ROOT)))
-                .toList();
-        }
-
-        return List.of();
-    }
-
-    private enum QualityPreset {
+    enum QualityPreset {
         QUALITY,
         BALANCED,
         PERFORMANCE;

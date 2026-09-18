@@ -7,18 +7,18 @@ import java.awt.image.BufferedImage;
 import java.awt.image.DataBufferInt;
 import java.util.Arrays;
 
-/** Independent 4x4 YCbCr blocks, carried by opaque vanilla map palette entries 4..131.
- * Each block has 8-bit Y endpoints, averaged Cb/Cr, sixteen 4-bit Y selectors and
- * optional quantized horizontal/vertical chroma slopes.
+/** Version 5: spatial 16x16 carrier regions with independent endpoint, chroma,
+ * selector and mode planes. Each region contains sixteen 4x4 image blocks.
+ * Flat/gradient blocks retain unused selector cells to avoid needless updates.
  */
 public final class FilmCodec {
     public static final int TILE_SIZE = 128;
     public static final int HEADER_SIZE = 16;
-    public static final int BLOCK_BYTES = 14;
-    public static final int BLOCK_PAYLOAD_END = HEADER_SIZE + 32 * 32 * BLOCK_BYTES;
-    private static final int GRADIENT_BITS = 13;
-    public static final int PAYLOAD_END = BLOCK_PAYLOAD_END + (32 * 32 * GRADIENT_BITS + 6) / 7;
-    private static final int[] MAGIC = {77, 67, 67, 70, 73, 76, 77, 3, 26, 2, 4, 4, 8, 8, 4, 96};
+    public static final int RECORD_BITS = 109;
+    public static final int MACRO_SIZE = 16;
+    public static final int MACRO_DATA_SYMBOLS = 255;
+    public static final int PAYLOAD_END = TILE_SIZE * TILE_SIZE;
+    private static final int[] MAGIC = {77, 67, 67, 70, 73, 76, 77, 5, 26, 2, 4, 4, 8, 8, 4, 96};
     private static final byte[] SHADOW_SELECTOR = createShadowSelectors();
 
     private FilmCodec() {}
@@ -65,9 +65,13 @@ public final class FilmCodec {
     }
 
     public static byte[] encodeTile(int[] rgb, int stride, int originX, int originY) {
+        return encodeTile(rgb, stride, originX, originY, null);
+    }
+
+    public static byte[] encodeTile(int[] rgb, int stride, int originX, int originY, byte[] previous) {
         byte[] result = new byte[TILE_SIZE * TILE_SIZE];
         Arrays.fill(result, (byte) 4);
-        for (int i = 0; i < MAGIC.length; i++) result[i] = (byte) (MAGIC[i] + 4);
+        boolean reusePrevious = isEncoded(previous);
         int[] luma = new int[16];
         int[] shadowSelectors = new int[16];
         double[] cbValues = new double[16];
@@ -94,18 +98,169 @@ public final class FilmCodec {
                         cr += crValues[pixel];
                     }
                 }
-                int block = by * 32 + bx;
-                int offset = HEADER_SIZE + block * BLOCK_BYTES;
+                int macroX = bx / 4;
+                int macroY = by / 4;
+                int recordBit = ((by & 3) * 4 + (bx & 3)) * RECORD_BITS;
                 double averageCb = cb / 16;
                 double averageCr = cr / 16;
                 int cbByte = clamp((int) Math.round(128 + averageCb));
                 int crByte = clamp((int) Math.round(128 + averageCr));
                 boolean shadowCurve = selectLumaCurve(luma, shadowSelectors, min, max, lumaSum);
-                writeBlock(result, offset, min, max, cbByte, crByte, luma);
-                encodeDetail(result, block, cbValues, crValues, averageCb, averageCr, shadowCurve);
+                writeBlock(result, macroX, macroY, recordBit, min, max, cbByte, crByte);
+                encodeDetail(result, macroX, macroY, recordBit, cbValues, crValues,
+                    averageCb, averageCr, shadowCurve);
+                selectBlockMode(result, reusePrevious ? previous : null, macroX, macroY, recordBit,
+                    min, max, shadowCurve, luma);
+                if (reusePrevious && !sameBlock(result, previous, macroX, macroY, recordBit)
+                    && visuallyEquivalent(result, previous, macroX, macroY, recordBit)) {
+                    copyRecord(previous, result, macroX, macroY, recordBit);
+                }
             }
         }
+        for (int i = 0; i < MAGIC.length; i++) {
+            setSymbol(result, i % 8, i / 8, 255, MAGIC[i]);
+        }
         return result;
+    }
+
+    // Keep all endpoint/chroma precision. Compact modes only approximate luma,
+    // by at most one level relative to the existing detailed reconstruction.
+    private static void selectBlockMode(byte[] data, byte[] previous, int mx, int my, int base,
+                                         int min, int max, boolean shadow, int[] selectors) {
+        int mode = 0;
+        if (max - min <= 2) {
+            mode = 1;
+        } else {
+            double a = selectorLuma(selectors[0], min, max, shadow);
+            double b = selectorLuma(selectors[3], min, max, shadow);
+            double c = selectorLuma(selectors[12], min, max, shadow);
+            double d = selectorLuma(selectors[15], min, max, shadow);
+            boolean fits = true;
+            for (int y = 0; y < 4 && fits; y++) {
+                for (int x = 0; x < 4; x++) {
+                    double upper = a + (b - a) * x / 3.0;
+                    double lower = c + (d - c) * x / 3.0;
+                    double reconstructed = upper + (lower - upper) * y / 3.0;
+                    if (Math.abs(reconstructed - selectorLuma(selectors[y * 4 + x], min, max, shadow)) > 1) {
+                        fits = false;
+                        break;
+                    }
+                }
+            }
+            if (fits) mode = 2;
+        }
+        putRaw(data, mx, my, 1736 + (base / RECORD_BITS) * 3 + 1, 2, mode);
+        if (mode == 2) {
+            put(data, mx, my, base + 32, 4, selectors[0]);
+            put(data, mx, my, base + 36, 4, selectors[3]);
+            put(data, mx, my, base + 40, 4, selectors[12]);
+            put(data, mx, my, base + 44, 4, selectors[15]);
+        } else if (mode == 0) {
+            for (int i = 0; i < 16; i++) put(data, mx, my, base + 32 + i * 4, 4, selectors[i]);
+        }
+        if (mode != 0 && previous != null) {
+            for (int i = mode == 1 ? 0 : 4; i < 16; i++) {
+                int bit = base + 32 + i * 4;
+                put(data, mx, my, bit, 4, get(previous, mx, my, bit, 4));
+            }
+        }
+    }
+
+    private static double selectorLuma(int selector, int min, int max, boolean shadow) {
+        double fraction = selector / 15.0;
+        if (shadow) fraction *= fraction;
+        return min + (max - min) * fraction;
+    }
+
+    private static boolean visuallyEquivalent(byte[] current, byte[] previous,
+                                               int macroX, int macroY, int recordBit) {
+        int currentMin = get(current, macroX, macroY, recordBit, 8);
+        int previousMin = get(previous, macroX, macroY, recordBit, 8);
+        int currentMax = get(current, macroX, macroY, recordBit + 8, 8);
+        int previousMax = get(previous, macroX, macroY, recordBit + 8, 8);
+        double currentCb = get(current, macroX, macroY, recordBit + 16, 8) - 128.0;
+        double previousCb = get(previous, macroX, macroY, recordBit + 16, 8) - 128.0;
+        double currentCr = get(current, macroX, macroY, recordBit + 24, 8) - 128.0;
+        double previousCr = get(previous, macroX, macroY, recordBit + 24, 8) - 128.0;
+        int currentDetail = get(current, macroX, macroY, recordBit + 96, 13);
+        int previousDetail = get(previous, macroX, macroY, recordBit + 96, 13);
+        // Protect dark ramps and high-contrast text/edges. Modest midtone detail
+        // may retain up to three levels; reference is retained data, never raw last input.
+        double tolerance = currentMin < 32 || currentMax - currentMin > 64 ? 1.0 : 3.0;
+        if (Math.abs(currentMin - previousMin) > 4 || Math.abs(currentMax - previousMax) > 4
+            || Math.abs(currentCb - previousCb) > 3 || Math.abs(currentCr - previousCr) > 3) {
+            return false;
+        }
+
+        for (int pixel = 0; pixel < 16; pixel++) {
+            int x = pixel & 3;
+            int y = pixel >> 2;
+            double currentY = decodeLuma(current, macroX, macroY, recordBit, pixel,
+                currentMin, currentMax, currentDetail);
+            double previousY = decodeLuma(previous, macroX, macroY, recordBit, pixel,
+                previousMin, previousMax, previousDetail);
+            double currentPixelCb = decodeChroma(currentCb, currentDetail, x, y, 0);
+            double previousPixelCb = decodeChroma(previousCb, previousDetail, x, y, 0);
+            double currentPixelCr = decodeChroma(currentCr, currentDetail, x, y, 6);
+            double previousPixelCr = decodeChroma(previousCr, previousDetail, x, y, 6);
+            if (Math.abs((currentY + 1.402 * currentPixelCr) - (previousY + 1.402 * previousPixelCr)) > tolerance
+                || Math.abs((currentY - 0.344136 * currentPixelCb - 0.714136 * currentPixelCr)
+                    - (previousY - 0.344136 * previousPixelCb - 0.714136 * previousPixelCr)) > tolerance
+                || Math.abs((currentY + 1.772 * currentPixelCb) - (previousY + 1.772 * previousPixelCb)) > tolerance) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean sameBlock(byte[] current, byte[] previous,
+                                     int macroX, int macroY, int recordBit) {
+        if (mode(current, macroX, macroY, recordBit) != mode(previous, macroX, macroY, recordBit)) return false;
+        for (int bit = 0; bit < RECORD_BITS; bit += 13) {
+            int count = Math.min(13, RECORD_BITS - bit);
+            if (get(current, macroX, macroY, recordBit + bit, count)
+                != get(previous, macroX, macroY, recordBit + bit, count)) return false;
+        }
+        return true;
+    }
+
+    private static void copyRecord(byte[] source, byte[] target,
+                                   int macroX, int macroY, int recordBit) {
+        putRaw(target, macroX, macroY, 1736 + (recordBit / RECORD_BITS) * 3 + 1, 2,
+            mode(source, macroX, macroY, recordBit));
+        for (int bit = 0; bit < RECORD_BITS; bit += 13) {
+            int count = Math.min(13, RECORD_BITS - bit);
+            put(target, macroX, macroY, recordBit + bit, count,
+                get(source, macroX, macroY, recordBit + bit, count));
+        }
+    }
+
+    private static double decodeLuma(byte[] data, int macroX, int macroY, int recordBit, int pixel,
+                                     int min, int max, int detail) {
+        int mode = mode(data, macroX, macroY, recordBit);
+        if (mode == 1) return (min + max) * 0.5;
+        if (mode == 2) {
+            boolean shadow = (detail & 4096) != 0;
+            double a = selectorLuma(get(data, macroX, macroY, recordBit + 32, 4), min, max, shadow);
+            double b = selectorLuma(get(data, macroX, macroY, recordBit + 36, 4), min, max, shadow);
+            double c = selectorLuma(get(data, macroX, macroY, recordBit + 40, 4), min, max, shadow);
+            double d = selectorLuma(get(data, macroX, macroY, recordBit + 44, 4), min, max, shadow);
+            double x = (pixel & 3) / 3.0, y = (pixel >> 2) / 3.0;
+            return (a + (b - a) * x) * (1 - y) + (c + (d - c) * x) * y;
+        }
+        double selector = get(data, macroX, macroY, recordBit + 32 + pixel * 4, 4) / 15.0;
+        if ((detail & 4096) != 0) selector *= selector;
+        return min + (max - min) * selector;
+    }
+
+    private static double decodeChroma(double average, int detail, int x, int y, int shift) {
+        int slopeX = signedGradient((detail >> shift) & 7);
+        int slopeY = signedGradient((detail >> (shift + 3)) & 7);
+        return average + slopeX * (x - 1.5) + slopeY * (y - 1.5);
+    }
+
+    private static int signedGradient(int value) {
+        return value >= 4 ? value - 8 : value;
     }
 
     private static boolean selectLumaCurve(int[] luma, int[] shadowSelectors,
@@ -145,23 +300,17 @@ public final class FilmCodec {
         return selectors;
     }
 
-    private static void writeBlock(byte[] result, int offset, int min, int max,
-                                   int cb, int cr, int[] selectors) {
-        long low = min | (long) max << 8 | (long) cb << 16 | (long) cr << 24;
-        long high = 0;
-        for (int i = 0; i < 8; i++) low |= (long) selectors[i] << (32 + i * 4);
-        for (int i = 8; i < 16; i++) high |= (long) selectors[i] << ((i - 8) * 4);
-        for (int symbol = 0; symbol < 9; symbol++) {
-            result[offset + symbol] = (byte) (((low >>> (symbol * 7)) & 127) + 4);
-        }
-        result[offset + 9] = (byte) (((low >>> 63 | (high & 63) << 1) & 127) + 4);
-        for (int symbol = 10; symbol < 14; symbol++) {
-            int shift = 6 + (symbol - 10) * 7;
-            result[offset + symbol] = (byte) (((high >>> shift) & 127) + 4);
-        }
+    private static void writeBlock(byte[] result, int macroX, int macroY, int recordBit,
+                                   int min, int max,
+                                   int cb, int cr) {
+        put(result, macroX, macroY, recordBit, 8, min);
+        put(result, macroX, macroY, recordBit + 8, 8, max);
+        put(result, macroX, macroY, recordBit + 16, 8, cb);
+        put(result, macroX, macroY, recordBit + 24, 8, cr);
     }
 
-    private static void encodeDetail(byte[] result, int block, double[] cb, double[] cr,
+    private static void encodeDetail(byte[] result, int macroX, int macroY, int recordBit,
+                                     double[] cb, double[] cr,
                                      double averageCb, double averageCr, boolean shadowCurve) {
         int cbX = quantizeSlope(slope(cb, true));
         int cbY = quantizeSlope(slope(cb, false));
@@ -171,14 +320,13 @@ public final class FilmCodec {
         double gradientError = error(cb, averageCb, cbX, cbY)
             + error(cr, averageCr, crX, crY);
         boolean useful = gradientError + 4 < flatError * 0.9;
-        int bit = block * GRADIENT_BITS;
         if (useful) {
-            put(result, BLOCK_PAYLOAD_END, bit, 3, cbX & 7);
-            put(result, BLOCK_PAYLOAD_END, bit + 3, 3, cbY & 7);
-            put(result, BLOCK_PAYLOAD_END, bit + 6, 3, crX & 7);
-            put(result, BLOCK_PAYLOAD_END, bit + 9, 3, crY & 7);
+            put(result, macroX, macroY, recordBit + 96, 3, cbX & 7);
+            put(result, macroX, macroY, recordBit + 99, 3, cbY & 7);
+            put(result, macroX, macroY, recordBit + 102, 3, crX & 7);
+            put(result, macroX, macroY, recordBit + 105, 3, crY & 7);
         }
-        if (shadowCurve) put(result, BLOCK_PAYLOAD_END, bit + 12, 1, 1);
+        if (shadowCurve) put(result, macroX, macroY, recordBit + 108, 1, 1);
     }
 
     private static double slope(double[] values, boolean horizontal) {
@@ -210,18 +358,80 @@ public final class FilmCodec {
     public static boolean isEncoded(byte[] bytes) {
         if (bytes == null || bytes.length != TILE_SIZE * TILE_SIZE) return false;
         for (int i = 0; i < MAGIC.length; i++) {
-            if ((bytes[i] & 255) != MAGIC[i] + 4) return false;
+            if (getSymbol(bytes, i % 8, i / 8, 255) != MAGIC[i]) return false;
         }
         return true;
     }
 
-    private static void put(byte[] data, int base, int bit, int count, int value) {
-        for (int i = 0; i < count; i++) {
-            int index = base + (bit + i) / 7;
-            int symbol = (data[index] & 255) - 4;
-            symbol |= ((value >>> i) & 1) << ((bit + i) % 7);
-            data[index] = (byte) (symbol + 4);
+    private static void put(byte[] data, int macroX, int macroY, int bit, int count, int value) {
+        int record = bit / RECORD_BITS, field = bit % RECORD_BITS;
+        int available = field < 16 ? 16 - field : field < 32 ? 32 - field
+            : field < 96 ? 96 - field : field < 108 ? 108 - field : 1;
+        int first = Math.min(count, available);
+        putRaw(data, macroX, macroY, planeBit(record, field), first, value);
+        if (first < count) put(data, macroX, macroY, bit + first, count - first, value >>> first);
+    }
+
+    private static int get(byte[] data, int macroX, int macroY, int bit, int count) {
+        int record = bit / RECORD_BITS, field = bit % RECORD_BITS;
+        int available = field < 16 ? 16 - field : field < 32 ? 32 - field
+            : field < 96 ? 96 - field : field < 108 ? 108 - field : 1;
+        int first = Math.min(count, available);
+        int value = getRaw(data, macroX, macroY, planeBit(record, field), first);
+        if (first < count) value |= get(data, macroX, macroY, bit + first, count - first) << first;
+        return value;
+    }
+
+    private static int planeBit(int record, int field) {
+        if (field < 16) return record * 16 + field;
+        if (field < 32) return 259 + record * 28 + field - 16;
+        if (field < 96) return 707 + record * 64 + field - 32;
+        if (field < 108) return 259 + record * 28 + 16 + field - 96;
+        return 1736 + record * 3;
+    }
+
+    private static int mode(byte[] data, int mx, int my, int base) {
+        return getRaw(data, mx, my, 1736 + (base / RECORD_BITS) * 3 + 1, 2);
+    }
+
+    private static void putRaw(byte[] data, int macroX, int macroY, int bit, int count, int value) {
+        int firstSymbol = bit / 7;
+        int shift = bit % 7;
+        int symbolCount = (shift + count + 6) / 7;
+        int packed = 0;
+        for (int i = 0; i < symbolCount; i++) {
+            packed |= getSymbol(data, macroX, macroY, firstSymbol + i) << (i * 7);
         }
+        int valueMask = (1 << count) - 1;
+        int mask = valueMask << shift;
+        packed = (packed & ~mask) | (value & valueMask) << shift;
+        for (int i = 0; i < symbolCount; i++) {
+            setSymbol(data, macroX, macroY, firstSymbol + i, (packed >>> (i * 7)) & 127);
+        }
+    }
+
+    private static int getRaw(byte[] data, int macroX, int macroY, int bit, int count) {
+        int firstSymbol = bit / 7;
+        int shift = bit % 7;
+        int symbolCount = (shift + count + 6) / 7;
+        int packed = 0;
+        for (int i = 0; i < symbolCount; i++) {
+            packed |= getSymbol(data, macroX, macroY, firstSymbol + i) << (i * 7);
+        }
+        return (packed >>> shift) & ((1 << count) - 1);
+    }
+
+    private static void setSymbol(byte[] data, int macroX, int macroY, int symbol, int value) {
+        data[symbolIndex(macroX, macroY, symbol)] = (byte) (value + 4);
+    }
+
+    private static int getSymbol(byte[] data, int macroX, int macroY, int symbol) {
+        return (data[symbolIndex(macroX, macroY, symbol)] & 255) - 4;
+    }
+
+    private static int symbolIndex(int macroX, int macroY, int symbol) {
+        return (macroY * MACRO_SIZE + symbol / MACRO_SIZE) * TILE_SIZE
+            + macroX * MACRO_SIZE + symbol % MACRO_SIZE;
     }
 
     private static int clamp(int value) {

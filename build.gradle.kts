@@ -3,6 +3,7 @@ import net.minecrell.pluginyml.bukkit.BukkitPluginDescription
 repositories {
     maven("https://repo.papermc.io/repository/maven-public/")
     maven("https://repo.erethon.de/snapshots/")
+    maven("https://eldonexus.de/repository/maven-public/")
     maven("https://jitpack.io")
     mavenCentral()
 }
@@ -23,6 +24,8 @@ java {
 
 dependencies {
     paperweight.paperDevBundle("26.2.build.+")
+    compileOnly("net.strokkur.commands:annotations-paper:2.3.0")
+    annotationProcessor("net.strokkur.commands:processor-paper:2.3.0")
     implementation("de.erethon:bedrock:1.5.18") { isTransitive = false }
     // FFmpeg
     implementation("org.bytedeco:javacv:1.5.10")
@@ -121,6 +124,10 @@ tasks {
             }
             register("mccinema.reload") {
                 description = "Allows reloading MCCinema config"
+                default = BukkitPluginDescription.Permission.Default.OP
+            }
+            register("mccinema.debug") {
+                description = "Allows viewing and changing playback diagnostics"
                 default = BukkitPluginDescription.Permission.Default.OP
             }
             register("mccinema.help") {

@@ -1118,6 +1118,7 @@ public class VideoPlayer {
         long dither = performanceMetrics.getLastDitheringUs();
         long upscale = performanceMetrics.getLastUpscalingUs();
         long tiles = performanceMetrics.getLastTileExtractionUs();
+        long packetDispatch = performanceMetrics.getLastPacketDispatchUs();
         long total = performanceMetrics.getLastTotalFrameUs();
         long frameBytes = packetDispatcher.getLastFrameBytesSent();
         int sentTiles = packetDispatcher.getLastFrameTileCount();
@@ -1135,7 +1136,7 @@ public class VideoPlayer {
             "<gray>FPS: <white>%.1f</white> <dark_gray>|</dark_gray> " +
             "T: <white>%.1fms</white> <dark_gray>[</dark_gray>" +
             "<yellow>D:%.1f</yellow> <gold>" + (frameProcessor.isExperimentalFilm() ? "C:" : "Di:") +
-            "%.1f</gold> <gold>U:%.1f</gold> <aqua>Ti:%.1f</aqua>" +
+            "%.1f</gold> <gold>U:%.1f</gold> <aqua>Ti:%.1f</aqua> <blue>P:%.1f</blue>" +
             "<dark_gray>]</dark_gray> " +
             "<dark_gray>|</dark_gray> BW: <white>%s/s</white> <gray>(%s/f cap:%s)</gray> " +
             "<dark_gray>|</dark_gray> <light_purple>Tiles:<white>%d</white> MR:<white>%d</white> Avg:<white>%s</white> Save:<white>%.0f%%</white>/<green>%.0f%%</green> M:<white>%.2f</white> A:<white>%s</white></light_purple>" +
@@ -1146,6 +1147,7 @@ public class VideoPlayer {
             dither / 1000.0,
             upscale / 1000.0,
             tiles / 1000.0,
+            packetDispatch / 1000.0,
             formatBytes(bytesPerSecond),
             formatBytes(frameBytes),
             formatBytes(frameCapBytes),
