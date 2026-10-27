@@ -1,9 +1,11 @@
 package de.erethon.mccinema;
 
 import de.erethon.mccinema.commands.MCCCommandBrigadier;
+import de.erethon.mccinema.audio.AudioManager;
 import de.erethon.mccinema.dither.DitherLookupUtil;
 import de.erethon.mccinema.download.YoutubeDownloadManager;
 import de.erethon.mccinema.resourcepack.ResourcePackManager;
+import de.erethon.mccinema.resourcepack.ResourcePackManager.HostedResourcePack;
 import de.erethon.mccinema.screen.Screen;
 import de.erethon.mccinema.screen.ScreenManager;
 import de.erethon.mccinema.video.PacketDispatcher;
@@ -23,7 +25,9 @@ import org.bytedeco.ffmpeg.global.avutil;
 import org.bytedeco.javacv.FFmpegLogCallback;
 
 import java.io.File;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
@@ -159,10 +163,43 @@ public final class MCCinema extends EPlugin implements Listener {
 
     @EventHandler
     public void onPlayerJoin(PlayerJoinEvent event) {
+        resendAudioPacksAfterJoin(event.getPlayer());
         // Send last frame to joining players
         resendScreenFramesAfterJoin(event.getPlayer(), 20L);
         resendScreenFramesAfterJoin(event.getPlayer(), 60L);
         resendScreenFramesAfterJoin(event.getPlayer(), 120L);
+    }
+
+    private void resendAudioPacksAfterJoin(Player player) {
+        new BukkitRunnable() {
+            @Override
+            public void run() {
+                if (!player.isOnline() || resourcePackManager == null
+                    || !getConfig().getBoolean("resourcepack.auto-apply", true)) return;
+
+                Set<String> sentVideoIds = new HashSet<>();
+                boolean required = getConfig().getBoolean("resourcepack.required", false);
+                for (Screen screen : screenManager.getAllScreens()) {
+                    VideoPlayer videoPlayer = getVideoPlayer(screen);
+                    if (videoPlayer == null || (videoPlayer.getState() != VideoPlayer.State.PLAYING
+                        && videoPlayer.getState() != VideoPlayer.State.PAUSED)) continue;
+
+                    AudioManager audio = videoPlayer.getAudioManager();
+                    if (audio == null) continue;
+                    screen.updateViewerCache();
+                    if (!videoPlayer.getPlaybackViewers().contains(player)) continue;
+
+                    String videoId = audio.getVideoId();
+                    if (sentVideoIds.contains(videoId)) continue;
+                    HostedResourcePack pack = resourcePackManager.getHostedPack(videoId);
+                    if (pack == null) continue;
+
+                    player.addResourcePack(UUID.randomUUID(), pack.url(), pack.hash(),
+                        "This video requires a resource pack for audio playback", required);
+                    sentVideoIds.add(videoId);
+                }
+            }
+        }.runTaskLater(this, 20L);
     }
 
     private void resendScreenFramesAfterJoin(Player player, long delayTicks) {

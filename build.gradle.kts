@@ -23,7 +23,7 @@ java {
 }
 
 dependencies {
-    paperweight.paperDevBundle("26.2.build.+")
+    paperweight.paperDevBundle("26.3.build.+")
     compileOnly("net.strokkur.commands:annotations-paper:2.3.0")
     annotationProcessor("net.strokkur.commands:processor-paper:2.3.0")
     implementation("de.erethon:bedrock:1.5.18") { isTransitive = false }
@@ -55,7 +55,7 @@ tasks {
     }
 
     runServer {
-        minecraftVersion("26.2")
+        minecraftVersion("26.3")
     }
 
     reobfJar {
@@ -80,7 +80,7 @@ tasks {
     bukkit {
         load = BukkitPluginDescription.PluginLoadOrder.STARTUP
         main = "de.erethon.mccinema.MCCinema"
-        apiVersion = "26.2"
+        apiVersion = "26.2" // Lowest supported API version
         authors = listOf("Maki", "Malfrador")
         name = "MCCinema"
         version = project.version.toString()

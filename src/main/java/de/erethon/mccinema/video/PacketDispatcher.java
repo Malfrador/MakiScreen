@@ -11,14 +11,16 @@ import net.minecraft.network.protocol.game.ClientGamePacketListener;
 import net.minecraft.server.network.ServerGamePacketListenerImpl;
 import net.minecraft.world.level.saveddata.maps.MapId;
 import net.minecraft.world.level.saveddata.maps.MapItemSavedData;
-import org.bukkit.Bukkit;
 import org.bukkit.craftbukkit.entity.CraftPlayer;
 import org.bukkit.entity.Player;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -39,6 +41,9 @@ public class PacketDispatcher {
     // Maximum bytes to send per frame
     private static final int DEFAULT_MAX_BYTES_PER_FRAME = 10 * 1024 * 1024; // 10 MB
     private static final int MAX_PACKETS_PER_BUNDLE = BundlerInfo.BUNDLE_SIZE_LIMIT;
+    // Map id, patch dimensions, byte-array length and packet framing. This is
+    // an estimate because the final framing depends on the connection codec.
+    private static final int MAP_PACKET_OVERHEAD_BYTES = 16;
 
     // Target packets per second
     private static final int TARGET_PACKETS_PER_SECOND = 1800;
@@ -102,6 +107,8 @@ public class PacketDispatcher {
     private int maxPatchesPerTile = 24;
     private int minPatchArea = 16;
     private int patchPacketOverheadBytes = 0;
+    private final int maxMapPacketsPerFrame;
+    private final boolean interFrameCompression;
 
     // Bandwidth target controls
     private boolean bandwidthTargetEnabled = true;
@@ -111,6 +118,11 @@ public class PacketDispatcher {
 
     public PacketDispatcher(MCCinema plugin) {
         this.plugin = plugin;
+        int configuredMapPackets = plugin.getConfig().contains("performance.max-map-packets-per-frame", true)
+            ? plugin.getConfig().getInt("performance.max-map-packets-per-frame")
+            : plugin.getConfig().getInt("performance.max-packets-per-tick", 150);
+        this.maxMapPacketsPerFrame = clamp(configuredMapPackets, 1, MAX_PACKETS_PER_BUNDLE);
+        this.interFrameCompression = plugin.getConfig().getBoolean("performance.inter-frame-compression", true);
         updateAdaptiveLimit();
 
         // Load bandwidth optimization settings
@@ -208,12 +220,22 @@ public class PacketDispatcher {
         List<PreparedUpdate> lowPriorityUpdates = new ArrayList<>();
 
         List<TileUpdate> allUpdates = new ArrayList<>(updates.size() + deferredUpdates.size());
-        allUpdates.addAll(updates);
+        if (!experimentalFilm && !interFrameCompression) {
+            for (TileUpdate update : updates) {
+                byte[] data = update.mapData();
+                if (data != null && data.length == MapTile.TOTAL_PIXELS) {
+                    allUpdates.add(new TileUpdate(update.tile(),
+                        new MapTile.DirtyRegion(0, 0, MapTile.SIZE, MapTile.SIZE, data), data));
+                }
+            }
+        } else {
+            allUpdates.addAll(updates);
+        }
         allUpdates.addAll(deferredUpdates);
         deferredUpdates.clear();
         long dirtyTileCount = allUpdates.stream().filter(update -> update.dirtyRegion() != null).count();
         int maxRegionsPerTile = Math.max(1,
-            MAX_PACKETS_PER_BUNDLE / Math.max(1, (int) Math.min(Integer.MAX_VALUE, dirtyTileCount)));
+            maxMapPacketsPerFrame / Math.max(1, (int) Math.min(Integer.MAX_VALUE, dirtyTileCount)));
 
         boolean highMotionFrame = contentStats != null && contentStats.motionScore() >= adaptiveMotionThreshold;
         boolean flatFrame = contentStats != null && contentStats.motionScore() < adaptiveMotionThreshold &&
@@ -301,19 +323,19 @@ public class PacketDispatcher {
             effectiveMaxBytes = Math.min(effectiveMaxBytes, targetPerFrame);
         }
         lastFrameByteCap.set(effectiveMaxBytes);
-        int effectiveMaxPackets = useBundlePackets
+        int effectiveMaxPackets = Math.min(maxMapPacketsPerFrame, useBundlePackets
             ? MAX_PACKETS_PER_BUNDLE
             : (isSceneChange || sceneChangeFramesRemaining > 0
                 ? (int) (adaptiveMaxPacketsPerFrame * 1.3)
-                : adaptiveMaxPacketsPerFrame);
+                : adaptiveMaxPacketsPerFrame));
 
         long totalPacketCreationTime = 0;
 
         for (PreparedUpdate prepared : criticalUpdates) {
-            int updateSize = prepared.totalDataSize();
+            int updateSize = prepared.estimatedSize();
             int packetCount = prepared.regions().size();
 
-            if ((totalBytes + updateSize > maxBytesPerFrame * 2.0 && !packets.isEmpty()) ||
+            if ((totalBytes + updateSize > effectiveMaxBytes && !packets.isEmpty()) ||
                 packets.size() + packetCount > effectiveMaxPackets) {
                 skippedBytes += updateSize;
                 skippedPackets += packetCount;
@@ -332,12 +354,12 @@ public class PacketDispatcher {
             if (prepared.regions().size() > 1) {
                 sentMultiRegionTiles++;
             }
-            sentBoundingBytes += prepared.boundingSize();
-            sentFullMapBytes += MapTile.TOTAL_PIXELS;
+            sentBoundingBytes += prepared.boundingSize() + MAP_PACKET_OVERHEAD_BYTES;
+            sentFullMapBytes += MapTile.TOTAL_PIXELS + MAP_PACKET_OVERHEAD_BYTES;
         }
 
         for (PreparedUpdate prepared : highPriorityUpdates) {
-            int updateSize = prepared.totalDataSize();
+            int updateSize = prepared.estimatedSize();
             int packetCount = prepared.regions().size();
 
             if (packets.size() + packetCount > effectiveMaxPackets || totalBytes + updateSize > effectiveMaxBytes) {
@@ -358,12 +380,12 @@ public class PacketDispatcher {
             if (prepared.regions().size() > 1) {
                 sentMultiRegionTiles++;
             }
-            sentBoundingBytes += prepared.boundingSize();
-            sentFullMapBytes += MapTile.TOTAL_PIXELS;
+            sentBoundingBytes += prepared.boundingSize() + MAP_PACKET_OVERHEAD_BYTES;
+            sentFullMapBytes += MapTile.TOTAL_PIXELS + MAP_PACKET_OVERHEAD_BYTES;
         }
 
         for (PreparedUpdate prepared : normalUpdates) {
-            int updateSize = prepared.totalDataSize();
+            int updateSize = prepared.estimatedSize();
             int packetCount = prepared.regions().size();
 
             if (packets.size() + packetCount > effectiveMaxPackets || totalBytes + updateSize > effectiveMaxBytes) {
@@ -384,13 +406,13 @@ public class PacketDispatcher {
             if (prepared.regions().size() > 1) {
                 sentMultiRegionTiles++;
             }
-            sentBoundingBytes += prepared.boundingSize();
-            sentFullMapBytes += MapTile.TOTAL_PIXELS;
+            sentBoundingBytes += prepared.boundingSize() + MAP_PACKET_OVERHEAD_BYTES;
+            sentFullMapBytes += MapTile.TOTAL_PIXELS + MAP_PACKET_OVERHEAD_BYTES;
         }
 
         if (sceneChangeFramesRemaining == 0) {
             for (PreparedUpdate prepared : lowPriorityUpdates) {
-                int updateSize = prepared.totalDataSize();
+                int updateSize = prepared.estimatedSize();
                 int packetCount = prepared.regions().size();
                 int byteBudget = useBundlePackets ? effectiveMaxBytes : (int) (effectiveMaxBytes * 0.9);
 
@@ -410,8 +432,8 @@ public class PacketDispatcher {
                 if (prepared.regions().size() > 1) {
                     sentMultiRegionTiles++;
                 }
-                sentBoundingBytes += prepared.boundingSize();
-                sentFullMapBytes += MapTile.TOTAL_PIXELS;
+                sentBoundingBytes += prepared.boundingSize() + MAP_PACKET_OVERHEAD_BYTES;
+                sentFullMapBytes += MapTile.TOTAL_PIXELS + MAP_PACKET_OVERHEAD_BYTES;
             }
         } else {
             for (PreparedUpdate prepared : lowPriorityUpdates) {
@@ -446,45 +468,49 @@ public class PacketDispatcher {
         lastFrameBoundingBytes.set(sentBoundingBytes);
         lastFrameFullMapBytes.set(sentFullMapBytes);
 
+        long sendingStart = metrics != null ? System.nanoTime() : 0;
+        Set<UUID> baselineViewers = new HashSet<>();
+        long baselineBytes = 0;
+        int baselinePacketCount = 0;
         if (experimentalFilm) {
+            List<ClientboundMapItemDataPacket> baseline = null;
             for (Player viewer : recipients) {
                 long generation = plugin.getFilmResourcePack().loadedGeneration(viewer);
                 if (generation != 0 && !java.util.Objects.equals(filmViewerGenerations.get(viewer.getUniqueId()), generation)) {
                     // Synchronize with the shared SENT baseline, not the newest frame,
                     // which may include tiles deferred by the bandwidth budget.
-                    List<ClientboundMapItemDataPacket> baseline = new ArrayList<>();
-                    for (MapTile tile : screen.getTiles()) {
-                        baseline.add(createFullMapPacket(tile.getMapId(), tile.getLastSentData()));
+                    if (baseline == null) {
+                        baseline = new ArrayList<>();
+                        for (MapTile tile : screen.getTiles()) {
+                            baseline.add(createFullMapPacket(tile.getMapId(), tile.getLastSentData()));
+                        }
                     }
                     sendPacketsToPlayer(viewer, baseline);
                     filmViewerGenerations.put(viewer.getUniqueId(), generation);
+                    baselineViewers.add(viewer.getUniqueId());
+                    baselineBytes += (long) baseline.size() * (MapTile.TOTAL_PIXELS + MAP_PACKET_OVERHEAD_BYTES);
+                    baselinePacketCount += transportPacketCount(baseline.size());
                 }
             }
         }
 
-        if (packets.isEmpty()) {
-            lastFramePacketCount.set(0);
-            lastFrameBytesSent.set(0);
-            return;
-        }
-
-        int bytesSent = totalBytes;
-        int packetsSent = packets.size();
-
-        long sendingStart = metrics != null ? System.nanoTime() : 0;
+        int deltaRecipientCount = 0;
         for (Player player : recipients) {
+            if (baselineViewers.contains(player.getUniqueId())) continue;
             sendPacketsToPlayer(player, packets);
+            deltaRecipientCount++;
         }
         if (metrics != null) {
             metrics.recordPacketSending(System.nanoTime() - sendingStart);
         }
 
-        int actualPacketCount = useBundlePackets ? recipients.size() : packetsSent * recipients.size();
-        totalPacketsSent.addAndGet(actualPacketCount);
-        totalBytesSent.addAndGet((long) bytesSent * recipients.size());
+        int deltaPacketCount = transportPacketCount(packets.size()) * deltaRecipientCount;
+        long estimatedBytesSent = baselineBytes + (long) totalBytes * deltaRecipientCount;
+        totalPacketsSent.addAndGet(baselinePacketCount + deltaPacketCount);
+        totalBytesSent.addAndGet(estimatedBytesSent);
 
-        lastFramePacketCount.set(packetsSent);
-        lastFrameBytesSent.set(bytesSent);
+        lastFramePacketCount.set(packets.size() + (baselineViewers.isEmpty() ? 0 : screen.getTotalMaps()));
+        lastFrameBytesSent.set(Math.round((double) estimatedBytesSent / recipients.size()));
     }
 
     private void markUpdateSkipped(TileUpdate update) {
@@ -511,13 +537,18 @@ public class PacketDispatcher {
         if (experimentalFilm) {
             List<MapTile.DirtyRegion> regions = de.erethon.mccinema.video.film.FilmPatchPlanner.plan(
                 mapData, update.tile().getLastSentData(), dirtyRegion,
-                bundleRegionLimit, Math.max(12, patchPacketOverheadBytes));
+                bundleRegionLimit, Math.max(MAP_PACKET_OVERHEAD_BYTES, patchPacketOverheadBytes));
             int bytes = 0;
             for (MapTile.DirtyRegion region : regions) bytes += region.getDataSize();
             return new PreparedUpdate(update, regions, bytes, dirtyRegion.getDataSize());
         }
         if (mapData == null || mapData.length != MapTile.TOTAL_PIXELS) {
             return new PreparedUpdate(update, List.of(dirtyRegion), dirtyRegion.getDataSize(), dirtyRegion.getDataSize());
+        }
+
+        if (!interFrameCompression) {
+            MapTile.DirtyRegion fullRegion = new MapTile.DirtyRegion(0, 0, MapTile.SIZE, MapTile.SIZE, mapData);
+            return new PreparedUpdate(update, List.of(fullRegion), MapTile.TOTAL_PIXELS, dirtyRegion.getDataSize());
         }
 
         if (patchStrategy == PatchStrategy.FULL_MAP || dirtyRegion.getCoveragePercent() >= effectiveFullUpdateThreshold) {
@@ -540,7 +571,7 @@ public class PacketDispatcher {
             splitPayload += region.getDataSize();
         }
 
-        int effectivePatchOverhead = useBundlePackets ? 0 : patchPacketOverheadBytes;
+        int effectivePatchOverhead = Math.max(MAP_PACKET_OVERHEAD_BYTES, patchPacketOverheadBytes);
         int splitWithOverhead = splitPayload + splitRegions.size() * effectivePatchOverhead;
         int boxWithOverhead = dirtyRegion.getDataSize() + effectivePatchOverhead;
         if (splitWithOverhead >= boxWithOverhead) {
@@ -554,7 +585,8 @@ public class PacketDispatcher {
         byte[] baseline = tile.getLastSentData();
         if (baseline == null || baseline.length != MapTile.TOTAL_PIXELS) {
             baseline = new byte[MapTile.TOTAL_PIXELS];
-            tile.setLastSentData(baseline);
+        } else {
+            baseline = baseline.clone();
         }
         for (MapTile.DirtyRegion region : regions) {
             for (int row = 0; row < region.height(); row++) {
@@ -562,6 +594,7 @@ public class PacketDispatcher {
                 System.arraycopy(mapData, source, baseline, source, region.width());
             }
         }
+        tile.setLastSentData(baseline);
     }
 
     private List<MapTile.DirtyRegion> buildMultiRegions(TileUpdate update, int blockSize,
@@ -769,6 +802,7 @@ public class PacketDispatcher {
         }
 
         List<ClientboundMapItemDataPacket> packets = new ArrayList<>(screen.getTotalMaps());
+        long estimatedBytesPerViewer = 0;
 
         for (int i = 0; i < screen.getTiles().size(); i++) {
             MapTile tile = screen.getTile(i);
@@ -777,11 +811,14 @@ public class PacketDispatcher {
 
             ClientboundMapItemDataPacket packet = createFullMapPacket(tile.getMapId(), data);
             packets.add(packet);
+            estimatedBytesPerViewer += data.length + MAP_PACKET_OVERHEAD_BYTES;
         }
 
         for (Player player : recipients) {
             sendPacketsToPlayer(player, packets);
         }
+        totalPacketsSent.addAndGet((long) transportPacketCount(packets.size()) * recipients.size());
+        totalBytesSent.addAndGet(estimatedBytesPerViewer * recipients.size());
     }
 
     /**
@@ -803,6 +840,26 @@ public class PacketDispatcher {
             tile.resetFramesSinceLastSend();
             tile.resetAccumulatedChanges();
         }
+    }
+
+    /** Send the remaining exact changes when playback pauses and no later frame can catch them up. */
+    public void flushPendingFrame(Screen screen, Collection<? extends Player> recipients) {
+        List<ClientboundMapItemDataPacket> packets = new ArrayList<>();
+        long estimatedBytes = 0;
+        for (MapTile tile : screen.getTiles()) {
+            byte[] data = tile.getLastFrameData();
+            if (data == null || data.length != MapTile.TOTAL_PIXELS) continue;
+            MapTile.DirtyRegion region = tile.calculateDirtyRegionFromSent(data, true);
+            if (region == null) continue;
+            packets.add(createPacket(tile, region));
+            estimatedBytes += region.getDataSize() + MAP_PACKET_OVERHEAD_BYTES;
+            tile.setLastSentData(data);
+            tile.resetFramesSinceLastSend();
+            tile.resetAccumulatedChanges();
+        }
+        for (Player viewer : recipients) sendPacketsToPlayer(viewer, packets);
+        totalPacketsSent.addAndGet((long) transportPacketCount(packets.size()) * recipients.size());
+        totalBytesSent.addAndGet(estimatedBytes * recipients.size());
     }
 
     public void sendLastFrameToPlayer(Player player, Screen screen) {
@@ -830,6 +887,9 @@ public class PacketDispatcher {
 
         if (!packets.isEmpty()) {
             sendPacketsToPlayer(player, packets);
+            totalPacketsSent.addAndGet(transportPacketCount(packets.size()));
+            totalBytesSent.addAndGet((long) packets.size() *
+                (MapTile.TOTAL_PIXELS + MAP_PACKET_OVERHEAD_BYTES));
         }
     }
 
@@ -837,19 +897,26 @@ public class PacketDispatcher {
         ServerGamePacketListenerImpl connection = ((CraftPlayer) player).getHandle().connection;
 
         if (useBundlePackets && packets.size() > 1) {
-            if (packets.size() > MAX_PACKETS_PER_BUNDLE) {
-                throw new IllegalStateException("Frame contains " + packets.size()
-                    + " map packets, exceeding the atomic bundle limit of " + MAX_PACKETS_PER_BUNDLE);
+            for (int start = 0; start < packets.size(); start += MAX_PACKETS_PER_BUNDLE) {
+                int end = Math.min(packets.size(), start + MAX_PACKETS_PER_BUNDLE);
+                if (end == start + 1) {
+                    connection.send(packets.get(start));
+                    continue;
+                }
+                List<Packet<? super ClientGamePacketListener>> packetList = new ArrayList<>(packets.subList(start, end));
+                connection.send(new ClientboundBundlePacket(packetList));
             }
-            // Bundle all map packets into a single bundle packet
-            List<Packet<? super ClientGamePacketListener>> packetList = new ArrayList<>(packets);
-            ClientboundBundlePacket bundlePacket = new ClientboundBundlePacket(packetList);
-            connection.send(bundlePacket);
         } else {
             for (ClientboundMapItemDataPacket packet : packets) {
                 connection.send(packet);
             }
         }
+    }
+
+    private int transportPacketCount(int mapPackets) {
+        return useBundlePackets && mapPackets > 1
+            ? (mapPackets + MAX_PACKETS_PER_BUNDLE - 1) / MAX_PACKETS_PER_BUNDLE
+            : mapPackets;
     }
 
     private ClientboundMapItemDataPacket createPacket(MapTile tile, MapTile.DirtyRegion region) {
@@ -969,6 +1036,9 @@ public class PacketDispatcher {
     }
 
     private record PreparedUpdate(TileUpdate update, List<MapTile.DirtyRegion> regions, int totalDataSize, int boundingSize) {
+        int estimatedSize() {
+            return totalDataSize + regions.size() * MAP_PACKET_OVERHEAD_BYTES;
+        }
     }
 
     public long getLastFrameByteCap() {

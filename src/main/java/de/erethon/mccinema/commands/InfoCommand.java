@@ -63,7 +63,7 @@ public class InfoCommand {
             info.append("<gray>  Frames Skipped: <white>").append(player.getFramesSkipped()).append("</white>\n");
             info.append("<gray>  Packets Sent: <white>").append(formatNumber(player.getPacketDispatcher().getTotalPacketsSent()))
                 .append("</white>\n");
-            info.append("<gray>  Data Sent: <white>").append(formatBytes(player.getPacketDispatcher().getTotalBytesSent()))
+            info.append("<gray>  Estimated Data Sent: <white>").append(formatBytes(player.getPacketDispatcher().getTotalBytesSent()))
                 .append("</white>");
         } else {
             info.append("\n<gray>No video loaded");

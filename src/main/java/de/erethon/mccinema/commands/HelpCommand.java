@@ -28,6 +28,8 @@ public class HelpCommand {
               <white>/mcc stop <screen></white> <gray>- Stop playback
               <white>/mcc seek <screen> <time></white> <gray>- Seek to time (MM:SS)
               <white>/mcc crop <screen></white> <gray>- Interactively zoom and pan a local video
+              <white>/mcc crop <save|reset|cancel></white> <gray>- Finish or reset crop editing
+              <white>/mcc quality <screen> [show|status|quality|high|balanced|performance]</white> <gray>- View or set quality
               <white>/mcc reload</white> <gray>- Reload the config
 
             <yellow>Online Media:</yellow>

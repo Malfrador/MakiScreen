@@ -149,6 +149,10 @@ public class VideoPlayer {
         }
     }
 
+    public AudioManager getAudioManager() {
+        return audioManager;
+    }
+
     public void setTargetPlayerIds(Collection<UUID> targetPlayerIds) {
         if (targetPlayerIds == null || targetPlayerIds.isEmpty()) {
             this.targetPlayerIds = null;
@@ -380,6 +384,11 @@ public class VideoPlayer {
      * intentional large-screen pixel aesthetic.
      */
     private void configureDecodeResolution(int sourceWidth, int sourceHeight, int targetWidth, int targetHeight) {
+        configureDecodeResolution(grabber, sourceWidth, sourceHeight, targetWidth, targetHeight);
+    }
+
+    private void configureDecodeResolution(FFmpegFrameGrabber decoder, int sourceWidth, int sourceHeight,
+                                           int targetWidth, int targetHeight) {
         if (sourceWidth <= 0 || sourceHeight <= 0 || targetWidth <= 0 || targetHeight <= 0) {
             return;
         }
@@ -395,9 +404,9 @@ public class VideoPlayer {
 
         int decodeWidth = Math.max(1, (int) Math.round(sourceWidth * fitScale));
         int decodeHeight = Math.max(1, (int) Math.round(sourceHeight * fitScale));
-        grabber.setImageWidth(decodeWidth);
-        grabber.setImageHeight(decodeHeight);
-        grabber.setImageScalingFlags(org.bytedeco.ffmpeg.global.swscale.SWS_BILINEAR);
+        decoder.setImageWidth(decodeWidth);
+        decoder.setImageHeight(decodeHeight);
+        decoder.setImageScalingFlags(org.bytedeco.ffmpeg.global.swscale.SWS_BILINEAR);
 
         plugin.getLogger().info("Downscaling video during decode from " +
             sourceWidth + "x" + sourceHeight + " to " + decodeWidth + "x" + decodeHeight +
@@ -456,7 +465,7 @@ public class VideoPlayer {
         plugin.getLogger().info("Started playback of " + sourceName);
     }
 
-    public void pause() {
+    public synchronized void pause() {
         if (state.get() != State.PLAYING) {
             return;
         }
@@ -472,6 +481,9 @@ public class VideoPlayer {
         pausedSeekFrameRendered = false;
         if (audioManager != null) {
             audioManager.pause();
+        }
+        if (framesProcessed.get() > 0) {
+            packetDispatcher.flushPendingFrame(screen, getPacketRecipients());
         }
         plugin.getLogger().info("Paused playback at frame " + pausedAtFrame);
     }
@@ -929,6 +941,8 @@ public class VideoPlayer {
                 pendingLiveGrabber = replacement;
             }
             replacement.start();
+            configureDecodeResolution(replacement, replacement.getImageWidth(), replacement.getImageHeight(),
+                screen.getPixelWidth(), screen.getPixelHeight());
             synchronized (liveDecoderLock) {
                 if (!isLiveDecoderCurrent(epoch)) return null;
                 grabber = replacement;
@@ -958,6 +972,8 @@ public class VideoPlayer {
                 pendingLiveGrabber = replacement;
             }
             replacement.start();
+            configureDecodeResolution(replacement, replacement.getImageWidth(), replacement.getImageHeight(),
+                screen.getPixelWidth(), screen.getPixelHeight());
             double refreshedFrameRate = replacement.getFrameRate();
             FFmpegFrameGrabber previous;
             synchronized (liveDecoderLock) {
@@ -1259,7 +1275,7 @@ public class VideoPlayer {
             "<yellow>D:%.1f</yellow> <gold>" + (frameProcessor.isExperimentalFilm() ? "C:" : "Di:") +
             "%.1f</gold> <gold>U:%.1f</gold> <aqua>Ti:%.1f</aqua> <blue>P:%.1f</blue>" +
             "<dark_gray>]</dark_gray> " +
-            "<dark_gray>|</dark_gray> BW: <white>%s/s</white> <gray>(%s/f cap:%s)</gray> " +
+            "<dark_gray>|</dark_gray> BW~: <white>%s/s</white> <gray>(%s/f cap:%s)</gray> " +
             "<dark_gray>|</dark_gray> <light_purple>Tiles:<white>%d</white> MR:<white>%d</white> Avg:<white>%s</white> Save:<white>%.0f%%</white>/<green>%.0f%%</green> M:<white>%.2f</white> A:<white>%s</white></light_purple>" +
             " <dark_gray>|</dark_gray> %s",
             debugCurrentFps,

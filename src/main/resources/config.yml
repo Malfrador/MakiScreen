@@ -29,8 +29,9 @@ youtube:
 
 # Performance Settings
 performance:
-  # Maximum packets per tick per player (higher = more bandwidth, smoother video)
-  max-packets-per-tick: 150
+  # Maximum map patch packets prepared per video frame.
+  # Existing max-packets-per-tick values are still accepted as a legacy fallback.
+  max-map-packets-per-frame: 150
 
   # Audio/video sync strategy for playback timing drift.
   av-sync:
@@ -53,8 +54,7 @@ performance:
   # Number of threads for frame processing
   processing-threads: 4
 
-  # Enable inter-frame compression (only send changed pixels)
-  # Massively reduces bandwidth at the cost of slight CPU overhead
+  # Send only changed map regions. Disabling this sends full maps every frame.
   inter-frame-compression: true
 
   # Minimum changed pixels percentage to send a full map update instead of patch
@@ -98,12 +98,12 @@ performance:
       # Range: 1-16384
       min-patch-area: 16
 
-      # Approximate packet overhead per patch for split-vs-single heuristic
-      # Set low when bundles are used and only bandwidth matters
+      # Additional estimated packet overhead per patch for split-vs-single heuristic.
+      # Values below the built-in 16-byte protocol estimate use that estimate.
       packet-overhead-bytes: 0
 
-    # Hard bandwidth ceiling (payload bytes per second)
-    # 20 MB/s target means ~1.0 MB/frame at 20 FPS
+    # Estimated per-viewer map bandwidth target (payload plus packet framing).
+    # A critical map update or a new viewer's full snapshot can exceed it.
     target:
       enabled: false
       bytes-per-second: 20971520

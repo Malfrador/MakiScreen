@@ -17,6 +17,7 @@ public class ScreenMapRenderer extends MapRenderer {
     private final MapTile tile;
     private final Screen screen;
     private final Map<MapCanvas, byte[]> lastRenderedData = new WeakHashMap<>();
+    private final Map<MapCanvas, byte[]> lastSourceData = new WeakHashMap<>();
     private static final byte[] BLACK = new byte[MapTile.TOTAL_PIXELS];
 
     static {
@@ -31,8 +32,8 @@ public class ScreenMapRenderer extends MapRenderer {
 
     @Override
     public void render(@NotNull MapView mapView, @NotNull MapCanvas canvas, @NotNull Player player) {
-        byte[] data = tile.getLastFrameData();
-        if (FilmCodec.isEncoded(data)) {
+        byte[] data = tile.getLastSentData();
+        if (FilmCodec.isEncoded(data) || FilmCodec.isEncoded(tile.getLastFrameData())) {
             MCCinema plugin = MCCinema.getInstance();
             var video = plugin.getVideoPlayer(screen);
             boolean canDecode = plugin.getFilmResourcePack().isLoaded(player)
@@ -40,18 +41,32 @@ public class ScreenMapRenderer extends MapRenderer {
             // Vanilla also sends item-frame map updates. Its canvas must agree with
             // our sent baseline, including constant headers and encoded black bars.
             // A contextual canvas prevents exposing transport pixels to other viewers.
-            data = canDecode ? tile.getLastSentData() : BLACK;
+            data = canDecode ? data : BLACK;
+        } else {
+            var video = MCCinema.getInstance().getVideoPlayer(screen);
+            if (video != null && video.hasTargetPlayerLimit() && !video.canSendTo(player)) data = BLACK;
         }
-        if (data == null || data.length != MapTile.TOTAL_PIXELS || data == lastRenderedData.get(canvas)) {
+        if (data == null || data.length != MapTile.TOTAL_PIXELS) {
             return;
         }
+        if (data == lastSourceData.get(canvas)) return;
 
+        byte[] rendered = lastRenderedData.get(canvas);
+        boolean firstRender = rendered == null;
+        if (rendered == null) {
+            rendered = new byte[MapTile.TOTAL_PIXELS];
+            lastRenderedData.put(canvas, rendered);
+        }
         for (int y = 0; y < MapTile.SIZE; y++) {
             int rowOffset = y * MapTile.SIZE;
             for (int x = 0; x < MapTile.SIZE; x++) {
-                canvas.setPixel(x, y, data[rowOffset + x]);
+                int index = rowOffset + x;
+                if (firstRender || rendered[index] != data[index]) {
+                    canvas.setPixel(x, y, data[index]);
+                    rendered[index] = data[index];
+                }
             }
         }
-        lastRenderedData.put(canvas, data);
+        lastSourceData.put(canvas, data);
     }
 }

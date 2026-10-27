@@ -299,7 +299,7 @@ public class FrameProcessor {
                     TileExtractionResult result = future.get();
                     fullMapData[result.tile.getTileIndex()] = result.mapData;
                     updates.add(new PacketDispatcher.TileUpdate(result.tile, result.dirtyRegion, result.mapData));
-                    result.tile.setLastFrameData(result.mapData.clone());
+                    result.tile.setLastFrameData(result.mapData);
                 } catch (Exception e) {
                     e.printStackTrace();
                 }
@@ -311,7 +311,7 @@ public class FrameProcessor {
 
                 MapTile.DirtyRegion dirtyRegion = tile.calculateDirtyRegionFromSent(mapData);
                 updates.add(new PacketDispatcher.TileUpdate(tile, dirtyRegion, mapData));
-                tile.setLastFrameData(mapData.clone());
+                tile.setLastFrameData(mapData);
             }
         }
 

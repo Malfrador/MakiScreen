@@ -13,20 +13,13 @@ public class MapTile implements ConfigurationSerializable {
     public static final int SIZE = 128;
     public static final int TOTAL_PIXELS = SIZE * SIZE;
 
-    // Minimum pixel change threshold - if fewer pixels changed, skip the update
-    // This prevents sending updates for imperceptible changes (e.g., dithering noise)
-    private static final int MIN_CHANGE_THRESHOLD = 16;
-
-    // minimum change density (changed pixels / total pixels)
-    private static final float MIN_CHANGE_DENSITY = 0.002f;
-
     private final int mapId;
     private final int tileX;
     private final int tileY;
     private final int tileIndex;
 
-    private byte[] lastFrameData;
-    private byte[] lastSentData; // Data that was actually sent to clients
+    private volatile byte[] lastFrameData;
+    private volatile byte[] lastSentData; // Immutable snapshot of what was sent to clients
     private DirtyRegion dirtyRegion;
     private boolean needsFullUpdate = true;
     private int unchangedFrameCount = 0;
@@ -118,6 +111,7 @@ public class MapTile implements ConfigurationSerializable {
             needsFullUpdate = false;
             return new DirtyRegion(0, 0, SIZE, SIZE, newData);
         }
+        if (lastSentData == newData) return null;
 
         int firstDiff = Arrays.mismatch(lastSentData, newData);
         if (firstDiff < 0) {
@@ -200,15 +194,11 @@ public class MapTile implements ConfigurationSerializable {
             }
         }
 
-        if (maxX < 0 || (!exact && changedPixelCount < MIN_CHANGE_THRESHOLD)) {
+        if (maxX < 0) {
             return null;
         }
 
-        // Skip if change density is too low
         float changeDensity = (float)changedPixelCount / TOTAL_PIXELS;
-        if (!exact && changeDensity < MIN_CHANGE_DENSITY) {
-            return null;
-        }
 
         int width = maxX - minX + 1;
         int height = maxY - minY + 1;

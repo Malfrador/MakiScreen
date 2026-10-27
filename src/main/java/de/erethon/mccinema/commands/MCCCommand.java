@@ -108,7 +108,8 @@ public final class MCCCommand {
 
     @Executes
     @Permission("mccinema.list")
-    void listScreens(CommandSender sender, @Literal({"list", "ls", "screens"}) String subcommand) {
+    void listScreensExplicit(CommandSender sender, @Literal({"list", "ls"}) String subcommand,
+                             @Literal("screens") String type) {
         list.listScreens(sender);
     }
 
@@ -136,7 +137,7 @@ public final class MCCCommand {
 
     @Executes
     @Permission("mccinema.control")
-    void pause(CommandSender sender,
+    void pause(CommandSender sender, @Literal("pause") String subcommand,
                @CustomArg(ScreenArgument.class) Screen screen) {
         pause.onExecute(sender, screen);
     }
@@ -150,7 +151,7 @@ public final class MCCCommand {
 
     @Executes
     @Permission("mccinema.control")
-    void stop(CommandSender sender,
+    void stop(CommandSender sender, @Literal("stop") String subcommand,
               @CustomArg(ScreenArgument.class) Screen screen) {
         stop.onExecute(sender, screen);
     }
@@ -179,13 +180,15 @@ public final class MCCCommand {
 
     @Executes
     @Permission("mccinema.crop")
-    void cropReset(@Executor Player player, @Literal({"crop", "zoom", "viewport"}) String subcommand) {
+    void cropReset(@Executor Player player, @Literal({"crop", "zoom", "viewport"}) String subcommand,
+                   @Literal("reset") String action) {
         crop.reset(player);
     }
 
     @Executes
     @Permission("mccinema.crop")
-    void cropCancel(@Executor Player player, @Literal({"crop", "zoom", "viewport"}) String subcommand) {
+    void cropCancel(@Executor Player player, @Literal({"crop", "zoom", "viewport"}) String subcommand,
+                    @Literal("cancel") String action) {
         crop.cancel(player);
     }
 
@@ -204,7 +207,8 @@ public final class MCCCommand {
 
     @Executes
     @Permission("mccinema.media")
-    void mediaRetry(CommandSender sender, @Literal({"media", "toolchain", "resolver"}) String subcommand) {
+    void mediaRetry(CommandSender sender, @Literal({"media", "toolchain", "resolver"}) String subcommand,
+                    @Literal("retry") String action) {
         media.retry(sender);
     }
 
@@ -257,21 +261,24 @@ public final class MCCCommand {
     @Executes
     @Permission("mccinema.debug")
     void qualityHigh(CommandSender sender, @Literal({"quality", "preset", "q"}) String subcommand,
-                     @CustomArg(ScreenArgument.class) Screen screen) {
+                     @CustomArg(ScreenArgument.class) Screen screen,
+                     @Literal({"high", "quality"}) String preset) {
         quality.apply(sender, screen, QualityCommand.QualityPreset.QUALITY);
     }
 
     @Executes
     @Permission("mccinema.debug")
     void qualityBalanced(CommandSender sender, @Literal({"quality", "preset", "q"}) String subcommand,
-                         @CustomArg(ScreenArgument.class) Screen screen) {
+                         @CustomArg(ScreenArgument.class) Screen screen,
+                         @Literal("balanced") String preset) {
         quality.apply(sender, screen, QualityCommand.QualityPreset.BALANCED);
     }
 
     @Executes
     @Permission("mccinema.debug")
     void qualityPerformance(CommandSender sender, @Literal({"quality", "preset", "q"}) String subcommand,
-                            @CustomArg(ScreenArgument.class) Screen screen) {
+                            @CustomArg(ScreenArgument.class) Screen screen,
+                            @Literal("performance") String preset) {
         quality.apply(sender, screen, QualityCommand.QualityPreset.PERFORMANCE);
     }
 
