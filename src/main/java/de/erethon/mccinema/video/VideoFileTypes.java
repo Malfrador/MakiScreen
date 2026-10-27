@@ -1,5 +1,6 @@
 package de.erethon.mccinema.video;
 
+import java.io.File;
 import java.util.Locale;
 import java.util.Set;
 
@@ -12,5 +13,9 @@ public final class VideoFileTypes {
         if (fileName == null) return false;
         String lower = fileName.toLowerCase(Locale.ROOT);
         return EXTENSIONS.stream().anyMatch(lower::endsWith);
+    }
+
+    public static boolean isPlayable(File file) {
+        return (file.isFile() && isSupported(file.getName())) || DcpComposition.isDcp(file);
     }
 }
