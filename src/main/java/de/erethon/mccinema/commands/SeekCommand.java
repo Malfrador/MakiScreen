@@ -24,6 +24,8 @@ public class SeekCommand {
 
         long timeMs = Math.min(requestedTimeMs, player.getTotalDurationMs());
 
+        // Stop the currently audible chunk before any seek feedback or decoder work.
+        if (player.getAudioManager() != null) player.getAudioManager().stop();
         sender.sendMessage(MM.deserialize(
             "<yellow>Seeking to " + VideoPlayer.formatDuration(timeMs) + "..."
         ));

@@ -31,6 +31,8 @@ public class HelpCommand {
               <white>/mcc seek <screen> <time></white> <gray>- Seek to time (MM:SS)
               <white>/mcc crop <screen></white> <gray>- Interactively zoom and pan a local video
               <white>/mcc crop <save|reset|cancel></white> <gray>- Finish or reset crop editing
+              <white>/mcc subtitle <screen> [on|off|select <track>]</white> <gray>- Personal action-bar subtitles
+              <white>/mcc subtitle <screen> global <on|off|select <track>></white> <gray>- Save screen subtitles (admin)
               <white>/mcc quality <screen> [show|status|quality|high|balanced|performance]</white> <gray>- View or set quality
               <white>/mcc reload</white> <gray>- Reload the config
 

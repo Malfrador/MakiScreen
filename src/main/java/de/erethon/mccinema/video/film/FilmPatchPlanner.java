@@ -12,6 +12,12 @@ public final class FilmPatchPlanner {
     public static List<MapTile.DirtyRegion> plan(byte[] current, byte[] previous,
                                                 MapTile.DirtyRegion bounding,
                                                 int limit, int overhead) {
+        return plan(current, previous, bounding, limit, overhead, 32);
+    }
+
+    static List<MapTile.DirtyRegion> plan(byte[] current, byte[] previous,
+                                          MapTile.DirtyRegion bounding,
+                                          int limit, int overhead, int cellSize) {
         if (limit <= 1 || previous == null || previous.length != current.length
             || bounding.getDataSize() <= overhead
             || bounding.changedPixelCount() >= bounding.getDataSize() * 0.85) {
@@ -68,7 +74,7 @@ public final class FilmPatchPlanner {
         int boundingCost = bounding.getDataSize() + overhead;
         int rowCost = payload + count * overhead;
         List<MapTile.DirtyRegion> cells = planCells(current, previous, bounding, limit,
-            overhead, Math.min(rowCost, boundingCost));
+            overhead, Math.min(rowCost, boundingCost), cellSize);
         if (cells != null) return cells;
         return rowCost < boundingCost
             ? materialize(current, left, right, top, bottom, count) : List.of(bounding);
@@ -76,15 +82,17 @@ public final class FilmPatchPlanner {
 
     private static List<MapTile.DirtyRegion> planCells(byte[] current, byte[] previous,
                                                         MapTile.DirtyRegion bounding, int limit,
-                                                        int overhead, int bestCost) {
-        int[] left = new int[16], right = new int[16], top = new int[16], bottom = new int[16];
+                                                        int overhead, int bestCost, int cellSize) {
+        int capacity = (128 / cellSize) * (128 / cellSize);
+        int[] left = new int[capacity], right = new int[capacity];
+        int[] top = new int[capacity], bottom = new int[capacity];
         int count = 0;
         int endY = bounding.y() + bounding.height(), endX = bounding.x() + bounding.width();
-        for (int cellY = bounding.y() / 32; cellY <= (endY - 1) / 32; cellY++) {
-            for (int cellX = bounding.x() / 32; cellX <= (endX - 1) / 32; cellX++) {
+        for (int cellY = bounding.y() / cellSize; cellY <= (endY - 1) / cellSize; cellY++) {
+            for (int cellX = bounding.x() / cellSize; cellX <= (endX - 1) / cellSize; cellX++) {
                 int minX = 128, maxX = -1, minY = 128, maxY = -1;
-                int y0 = Math.max(bounding.y(), cellY * 32), y1 = Math.min(endY, (cellY + 1) * 32);
-                int x0 = Math.max(bounding.x(), cellX * 32), x1 = Math.min(endX, (cellX + 1) * 32);
+                int y0 = Math.max(bounding.y(), cellY * cellSize), y1 = Math.min(endY, (cellY + 1) * cellSize);
+                int x0 = Math.max(bounding.x(), cellX * cellSize), x1 = Math.min(endX, (cellX + 1) * cellSize);
                 for (int y = y0; y < y1; y++) {
                     int row = y * 128;
                     int first = Arrays.mismatch(current, row + x0, row + x1,
@@ -106,7 +114,7 @@ public final class FilmPatchPlanner {
             }
         }
         if (count <= 1) return null;
-        int packetLimit = Math.min(limit, 8);
+        int packetLimit = limit;
         while (count > 1) {
             int bestA = -1, bestB = -1, bestExtra = Integer.MAX_VALUE;
             for (int a = 0; a < count; a++) {

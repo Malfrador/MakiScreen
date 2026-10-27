@@ -108,6 +108,13 @@ final class FfmpegProvider {
         return executable;
     }
 
+    String ffprobeExecutable() {
+        if (executable == null) return null;
+        String name = Loader.getPlatform().startsWith("windows") ? "ffprobe.exe" : "ffprobe";
+        File sibling = new File(executable).getParentFile();
+        return sibling == null ? name : new File(sibling, name).getAbsolutePath();
+    }
+
     String location() {
         return location;
     }

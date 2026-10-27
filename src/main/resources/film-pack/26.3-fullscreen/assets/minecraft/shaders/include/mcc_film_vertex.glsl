@@ -14,7 +14,7 @@ int mccSymbol(ivec2 position);
 
 bool mccFullscreenTexture() {
     return textureSize(Sampler0, 0) == ivec2(128, 128)
-        && (mccSymbol(ivec2(127, 15)) == 6 || mccSymbol(ivec2(127, 15)) == 7);
+        && (mccSymbol(ivec2(127, 15)) == 7 || mccSymbol(ivec2(127, 15)) == 11);
 }
 
 bool mccFilmTexture() {
@@ -35,9 +35,9 @@ bool mccFilmTexture() {
     int frameKind = mccSymbol(ivec2(127, 31));
     return mccSymbol(ivec2(79, 31)) == 26
         && mccSymbol(ivec2(95, 31)) == 3
-        && ((version == 6 && mccSymbol(ivec2(111, 31)) == 6
-                && (frameKind == 96 || frameKind == 97))
-            || (version == 7 && mccSymbol(ivec2(111, 31)) == 7 && frameKind == 98));
+        && ((version == 7 && mccSymbol(ivec2(111, 31)) == 7 && frameKind == 98)
+            || (version == 11 && mccSymbol(ivec2(111, 31)) == 11
+                && (frameKind == 99 || frameKind == 100)));
 }
 
 int mccSymbol(ivec2 position) {

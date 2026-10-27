@@ -302,6 +302,7 @@ public class PerformanceMetrics {
 
 
     public long getLastFrameDecodeUs() { return lastFrameDecodeUs; }
+    public long getLastImageConversionUs() { return lastImageConversionUs; }
     public long getLastDitheringUs() { return lastDitheringUs; }
     public long getLastUpscalingUs() { return lastUpscalingUs; }
     public long getLastTileExtractionUs() { return lastTileExtractionUs; }

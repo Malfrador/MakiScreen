@@ -51,6 +51,7 @@ public class QualityCommand {
 
         switch (preset) {
             case QUALITY -> {
+                processor.setFilmFlatFilter(0, 1);
                 processor.setDitheringMode(FrameProcessor.DitheringMode.ATKINSON);
                 processor.setErrorDiffusionStrength(0.92f);
                 processor.setErrorThreshold(2);
@@ -70,6 +71,7 @@ public class QualityCommand {
                 dispatcher.setBandwidthTargetBytesPerSecond(1000L * 1024L * 1024L);
             }
             case BALANCED -> {
+                processor.setFilmFlatFilter(8, 4);
                 processor.setDitheringMode(FrameProcessor.DitheringMode.FLOYD_STEINBERG);
                 processor.setErrorDiffusionStrength(0.78f);
                 processor.setErrorThreshold(4);
@@ -90,6 +92,7 @@ public class QualityCommand {
                 dispatcher.setBandwidthTargetBytesPerSecond(32L * 1024L * 1024L);
             }
             case PERFORMANCE -> {
+                processor.setFilmFlatFilter(12, 8);
                 processor.setDitheringMode(FrameProcessor.DitheringMode.FLOYD_STEINBERG_REDUCED);
                 processor.setErrorDiffusionStrength(0.60f);
                 processor.setErrorThreshold(14);
@@ -130,6 +133,12 @@ public class QualityCommand {
         sender.sendMessage(MM.deserialize("<gray>Patching: <white>" + dispatcher.getPatchStrategy() + "</white> | FullThr: <white>" + dispatcher.getFullUpdateThresholdPercent() + "%</white> | Block: <white>" + dispatcher.getMultiRegionBlockSize() + "</white> | MaxPatches: <white>" + dispatcher.getMaxPatchesPerTile() + "</white>"));
         sender.sendMessage(MM.deserialize("<gray>MinArea: <white>" + dispatcher.getMinPatchArea() + "</white> | Entropy: <white>" + (dispatcher.isUseEntropyFiltering() ? "ON" : "OFF") + "</white> | Spatial: <white>" + (dispatcher.isUseSpatialDownsampling() ? "ON" : "OFF") + "</white>"));
         sender.sendMessage(MM.deserialize("<gray>BW Target: <white>" + (dispatcher.isBandwidthTargetEnabled() ? formatBytes(dispatcher.getBandwidthTargetBytesPerSecond()) + "/s" : "OFF") + "</white>"));
+        if (processor.isExperimentalFilm()) {
+            int range = processor.getFilmFlatRange();
+            sender.sendMessage(MM.deserialize("<gray>Film flat filtering: <white>"
+                + (range == 0 ? "OFF" : "range " + range + ", color step "
+                    + processor.getFilmFlatColorStep()) + "</white>"));
+        }
     }
 
     private static String formatBytes(long bytes) {
@@ -137,9 +146,9 @@ public class QualityCommand {
             return bytes + "B";
         }
         if (bytes < 1024 * 1024) {
-            return String.format("%.1fKB", bytes / 1024.0);
+            return String.format("%.1fKiB", bytes / 1024.0);
         }
-        return String.format("%.1fMB", bytes / (1024.0 * 1024.0));
+        return String.format("%.1fMiB", bytes / (1024.0 * 1024.0));
     }
 
     enum QualityPreset {

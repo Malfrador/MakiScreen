@@ -109,6 +109,14 @@ tasks {
                 description = "Allows editing persisted video crop settings"
                 default = BukkitPluginDescription.Permission.Default.OP
             }
+            register("mccinema.subtitle") {
+                description = "Allows choosing personal action-bar subtitles"
+                default = BukkitPluginDescription.Permission.Default.TRUE
+            }
+            register("mccinema.subtitle.admin") {
+                description = "Allows saving screen subtitles for a video"
+                default = BukkitPluginDescription.Permission.Default.OP
+            }
             register("mccinema.download") {
                 description = "Allows downloading videos from YouTube"
                 default = BukkitPluginDescription.Permission.Default.OP

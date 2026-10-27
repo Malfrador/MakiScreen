@@ -54,6 +54,10 @@ performance:
   # Number of threads for frame processing
   processing-threads: 4
 
+  # Experimental fullscreen film encodes map tiles independently. A larger
+  # pool lowers frame latency on hosts with spare CPU capacity.
+  experimental-film-threads: 8
+
   # Send only changed map regions. Disabling this sends full maps every frame.
   inter-frame-compression: true
 
@@ -93,6 +97,10 @@ performance:
       # Hard cap for number of patches sent per tile in MULTI_REGION
       # Higher values improve compression for sparse noise/motion at some CPU cost
       max-patches-per-tile: 24
+
+      # Fullscreen film with Velocity compression is smaller on the wire with
+      # one larger patch per map. Set to 8 if proxy compression is disabled.
+      film-patches-per-tile: 1
 
       # Ignore tiny patch components below this area (pixels)
       # Range: 1-16384

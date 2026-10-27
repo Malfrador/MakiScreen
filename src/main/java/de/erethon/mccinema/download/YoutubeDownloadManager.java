@@ -126,6 +126,55 @@ public class YoutubeDownloadManager {
         }
     }
 
+    /** Read and cache every convertible embedded text subtitle stream in one media scan. */
+    public Map<String, File> extractTextSubtitles(File media, File directory, String cacheKey) throws Exception {
+        ensureFfmpegDetected();
+        if (!ffmpegProvider.available()) return Map.of();
+        String probe = ffmpegProvider.ffprobeExecutable();
+        if (probe == null) return Map.of();
+        ExternalProcess.Result listing = ExternalProcess.run(List.of(probe, "-v", "error",
+            "-select_streams", "s", "-show_entries", "stream=index,codec_name:stream_tags=language",
+            "-of", "json", media.getAbsolutePath()), Duration.ofSeconds(30),
+            ffmpegProvider.environment());
+        if (!listing.successful()) return Map.of();
+        JSONObject result = JSON.parseObject(listing.output());
+        if (result == null || result.getJSONArray("streams") == null) return Map.of();
+        Map<String, File> available = new LinkedHashMap<>();
+        List<String> command = new ArrayList<>(List.of(ffmpegProvider.executable(), "-nostdin",
+            "-hide_banner", "-loglevel", "error", "-i", media.getAbsolutePath()));
+        List<File> pending = new ArrayList<>();
+        Files.createDirectories(directory.toPath());
+        for (int i = 0; i < result.getJSONArray("streams").size(); i++) {
+            JSONObject stream = result.getJSONArray("streams").getJSONObject(i);
+            String codec = stream.getString("codec_name");
+            if (codec == null || !Set.of("subrip", "ass", "ssa", "mov_text", "webvtt",
+                "text", "ttml", "sami", "realtext", "subviewer", "subviewer1",
+                "microdvd", "mpl2", "jacosub", "pjs", "scc", "stl").contains(codec)) continue;
+            int index = stream.getIntValue("index");
+            String language = stream.getJSONObject("tags") == null ? null
+                : stream.getJSONObject("tags").getString("language");
+            String name = language == null || language.isBlank() || language.equals("und")
+                ? "track-" + index : language.toLowerCase(Locale.ROOT);
+            if (available.containsKey(name)) name += "-" + index;
+            File output = new File(directory, cacheKey + "-" + index + ".srt");
+            available.put(name, output);
+            if (output.isFile() && output.length() > 0 && output.lastModified() >= media.lastModified()) continue;
+            command.addAll(List.of("-map", "0:" + index, "-c:s", "srt", "-y", output.getAbsolutePath()));
+            pending.add(output);
+        }
+        if (!pending.isEmpty()) {
+            ExternalProcess.Result extraction = ExternalProcess.run(command, Duration.ofMinutes(3),
+                ffmpegProvider.environment());
+            if (!extraction.successful()) {
+                for (File output : pending) Files.deleteIfExists(output.toPath());
+                plugin.getLogger().warning("Could not extract embedded text subtitles: " + extraction.output());
+                available.entrySet().removeIf(entry -> !entry.getValue().isFile());
+            }
+        }
+        available.entrySet().removeIf(entry -> !entry.getValue().isFile() || entry.getValue().length() == 0);
+        return available;
+    }
+
     private ExternalProcess.Result executeYtDlp(List<String> arguments, Duration timeout, boolean useCookies)
         throws Exception {
         List<String> command = createYtDlpBaseCommand(useCookies);

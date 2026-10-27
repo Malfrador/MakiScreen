@@ -87,6 +87,7 @@ final class AudioExtractor {
 
         clearIncompleteOutput(cacheMarker);
         FFmpegFrameGrabber grabber = new FFmpegFrameGrabber(videoFile);
+        if (videoFile.getName().endsWith(".ffconcat")) grabber.setOption("safe", "0");
         File fullAudio = new File(audioDir, "full_audio.ogg");
         try {
             grabber.setSampleFormat(avutil.AV_SAMPLE_FMT_FLTP);
@@ -99,10 +100,17 @@ final class AudioExtractor {
             int sampleRate = grabber.getSampleRate();
             int sourceChannels = grabber.getAudioChannels();
             int outputChannels = positionalAudio ? 1 : Math.min(sourceChannels, 2);
+            boolean dcpAudio = videoFile.getName().endsWith(".ffconcat");
+            if (dcpAudio && !List.of(1, 2, 6, 8, 12, 16).contains(sourceChannels)) {
+                throw new IllegalArgumentException("Unsupported DCP sound channel count: " + sourceChannels);
+            }
+            if (dcpAudio && positionalAudio) {
+                throw new IllegalArgumentException("DCP sound requires stereo output");
+            }
 
             plugin.getLogger().info("Audio conversion: " + sampleRate + " Hz, " + sourceChannels +
                 " source channel(s) -> " + outputChannels + " output channel(s)");
-            extractFullAudio(grabber, fullAudio, sampleRate, outputChannels, durationMs);
+            extractFullAudio(grabber, fullAudio, sampleRate, outputChannels, durationMs, dcpAudio);
 
             List<AudioManager.AudioChunk> chunks;
             if (chunkDurationMs == 0) {
@@ -168,7 +176,8 @@ final class AudioExtractor {
     }
 
     private void extractFullAudio(FFmpegFrameGrabber grabber, File outputFile,
-                                  int sampleRate, int outputChannels, long durationMs) throws Exception {
+                                  int sampleRate, int outputChannels, long durationMs,
+                                  boolean dcpAudio) throws Exception {
         FFmpegFrameRecorder recorder = new FFmpegFrameRecorder(outputFile, 0, 0, outputChannels);
         try {
             recorder.setFormat("ogg");
@@ -185,7 +194,7 @@ final class AudioExtractor {
                 if (frame.samples == null) {
                     continue;
                 }
-                recorder.record(frame);
+                recorder.record(dcpAudio ? downmixDcp(frame) : frame);
                 int percent = percent(grabber.getTimestamp() / 1000, durationMs);
                 report(Stage.EXTRACTING, percent, formatTime(grabber.getTimestamp() / 1000) +
                     " / " + formatTime(durationMs));
@@ -194,6 +203,57 @@ final class AudioExtractor {
             closeRecorder(recorder);
         }
         report(Stage.EXTRACTING, 100, formatTime(durationMs) + " extracted");
+    }
+
+    private static Frame downmixDcp(Frame frame) {
+        int channels = frame.audioChannels;
+        if (channels == 2) return frame;
+        if (channels != 1 && channels != 6 && channels != 8 && channels != 12 && channels != 16) {
+            throw new IllegalArgumentException("Unsupported DCP sound channel count: " + channels);
+        }
+        if (frame.samples.length < channels) {
+            throw new IllegalArgumentException("Expected planar DCP audio samples");
+        }
+        FloatBuffer[] input = new FloatBuffer[channels];
+        for (int channel = 0; channel < channels; channel++) {
+            Buffer samples = frame.samples[channel];
+            if (samples instanceof FloatBuffer floats) input[channel] = floats.duplicate();
+            else if (samples instanceof ByteBuffer bytes) input[channel] = bytes.duplicate().asFloatBuffer();
+            else throw new IllegalArgumentException("Expected floating-point DCP audio samples");
+        }
+        int count = input[0].remaining();
+        FloatBuffer left = FloatBuffer.allocate(count);
+        FloatBuffer right = FloatBuffer.allocate(count);
+        float divisor = channels >= 12 ? 3.6642f : 2.6642f;
+        for (int i = 0; i < count; i++) {
+            if (channels == 1) {
+                float center = input[0].get();
+                left.put(center);
+                right.put(center);
+                continue;
+            }
+            float l = input[0].get();
+            float r = input[1].get();
+            float c = input[2].get();
+            float lfe = input[3].get();
+            float ls = input[4].get();
+            float rs = input[5].get();
+            // DCP channels 7/8 carry accessibility audio, not the rear channels.
+            for (int channel = 6; channel < channels; channel++) {
+                float sample = input[channel].get();
+                if (channel == 8 || channel == 10) l += 0.5f * sample;
+                if (channel == 9 || channel == 11) r += 0.5f * sample;
+            }
+            left.put((l + 0.7071f * c + 0.7071f * ls + 0.25f * lfe) / divisor);
+            right.put((r + 0.7071f * c + 0.7071f * rs + 0.25f * lfe) / divisor);
+        }
+        left.flip();
+        right.flip();
+        Frame stereo = new Frame();
+        stereo.sampleRate = frame.sampleRate;
+        stereo.audioChannels = 2;
+        stereo.samples = new Buffer[]{left, right};
+        return stereo;
     }
 
     private List<AudioManager.AudioChunk> encodeChunks(File fullAudio, int sampleRate,

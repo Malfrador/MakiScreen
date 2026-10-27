@@ -4,16 +4,23 @@ import de.erethon.mccinema.MCCinema;
 import de.erethon.mccinema.audio.AudioManager;
 import de.erethon.mccinema.screen.Screen;
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.format.TextColor;
+import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.text.minimessage.MiniMessage;
 import org.bytedeco.javacv.FFmpegFrameGrabber;
 import org.bytedeco.javacv.Frame;
 import org.bytedeco.javacv.Java2DFrameConverter;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
+import org.bukkit.scheduler.BukkitTask;
 
 import java.awt.Graphics2D;
 import java.awt.image.BufferedImage;
+import java.awt.image.DataBufferInt;
 import java.io.File;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.IntBuffer;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -32,6 +39,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import java.util.logging.Level;
 
@@ -76,6 +84,16 @@ public class VideoPlayer {
     private volatile VideoTransform videoTransform = VideoTransform.DEFAULT;
     private volatile FFmpegFrameGrabber grabber;
     private Java2DFrameConverter converter;
+    private final SubtitleRenderer subtitleRenderer = new SubtitleRenderer();
+    private SubtitleCatalog subtitleCatalog = new SubtitleCatalog(Map.of());
+    private SubtitleSettingsManager.Setting subtitleSetting = SubtitleSettingsManager.Setting.DEFAULT;
+    private final Map<UUID, String> personalSubtitleTracks = new ConcurrentHashMap<>();
+    private final Set<UUID> subtitleActionBarViewers = ConcurrentHashMap.newKeySet();
+    private BukkitTask subtitleTask;
+    private boolean packedRgbOutput;
+    private boolean packedRgbFallbackLogged;
+    private boolean packedRgbFrameLogged;
+    private BufferedImage packedRgbImage;
     private ScheduledExecutorService scheduler;
     private ScheduledFuture<?> playbackTask;
     private ScheduledExecutorService liveDecoderExecutor;
@@ -173,6 +191,92 @@ public class VideoPlayer {
         return audioManager;
     }
 
+    public void setSubtitleCatalog(SubtitleCatalog catalog) {
+        subtitleCatalog = catalog == null ? new SubtitleCatalog(Map.of()) : catalog;
+        updateGlobalSubtitleTrack();
+    }
+
+    public SubtitleCatalog getSubtitleCatalog() { return subtitleCatalog; }
+    public SubtitleSettingsManager.Setting getSubtitleSetting() { return subtitleSetting; }
+
+    public void setGlobalSubtitleSetting(SubtitleSettingsManager.Setting setting) {
+        subtitleSetting = setting == null ? SubtitleSettingsManager.Setting.DEFAULT : setting;
+        updateGlobalSubtitleTrack();
+        if (subtitleSetting.enabled()) {
+            clearSubtitleActionBars();
+        }
+    }
+
+    public void setPersonalSubtitleTrack(UUID viewer, String track) {
+        if (track == null) personalSubtitleTracks.remove(viewer);
+        else personalSubtitleTracks.put(viewer, track);
+        showSubtitleActionBars();
+    }
+
+    public String getPersonalSubtitleTrack(UUID viewer) {
+        return personalSubtitleTracks.get(viewer);
+    }
+
+    private void updateGlobalSubtitleTrack() {
+        String selected = subtitleSetting.track() == null ? subtitleCatalog.firstName() : subtitleSetting.track();
+        if (subtitleCatalog.get(selected) == null) selected = subtitleCatalog.firstName();
+        subtitleRenderer.setTrack(subtitleSetting.enabled() ? subtitleCatalog.get(selected) : null);
+    }
+
+    private void showSubtitleActionBars() {
+        if (subtitleSetting.enabled() || subtitleCatalog.isEmpty()
+            || (state.get() != State.PLAYING && state.get() != State.PAUSED)) {
+            clearSubtitleActionBars();
+            return;
+        }
+        long timeUs = Math.round(Math.max(0, currentFrame.get() - 1) * 1_000_000.0 / frameRate);
+        Set<UUID> showing = new HashSet<>();
+        for (Player viewer : getPacketRecipients()) {
+            UUID id = viewer.getUniqueId();
+            SubtitleTrack track = subtitleCatalog.get(personalSubtitleTracks.get(id));
+            if (track == null) continue;
+            List<SubtitleTrack.Cue> cues = track.activeAt(timeUs);
+            if (cues.isEmpty()) continue;
+            viewer.sendActionBar(subtitleActionBar(cues));
+            showing.add(id);
+            subtitleActionBarViewers.add(id);
+        }
+        for (UUID id : List.copyOf(subtitleActionBarViewers)) {
+            if (showing.contains(id)) continue;
+            Player viewer = Bukkit.getPlayer(id);
+            if (viewer != null && viewer.isOnline()) viewer.sendActionBar(Component.empty());
+            subtitleActionBarViewers.remove(id);
+        }
+    }
+
+    private static Component subtitleActionBar(List<SubtitleTrack.Cue> cues) {
+        Component result = Component.empty();
+        boolean first = true;
+        for (SubtitleTrack.Cue cue : cues) {
+            for (SubtitleTrack.Line line : cue.lines()) {
+                if (!first) result = result.append(Component.text("  |  ", TextColor.color(0xAAAAAA)));
+                first = false;
+                for (SubtitleTrack.Run run : line.runs()) {
+                    SubtitleTrack.Style style = run.style();
+                    Component text = Component.text(run.text(), TextColor.color(style.color().getRGB() & 0xFFFFFF));
+                    if (style.bold()) text = text.decorate(TextDecoration.BOLD);
+                    if (style.italic()) text = text.decorate(TextDecoration.ITALIC);
+                    if (style.underline()) text = text.decorate(TextDecoration.UNDERLINED);
+                    result = result.append(text);
+                }
+            }
+        }
+        return result;
+    }
+
+    private void clearSubtitleActionBars() {
+        for (UUID id : List.copyOf(subtitleActionBarViewers)) {
+            Player viewer = Bukkit.getPlayer(id);
+            if (viewer != null && viewer.isOnline()) viewer.sendActionBar(Component.empty());
+            subtitleActionBarViewers.remove(id);
+        }
+    }
+
     public void setTargetPlayerIds(Collection<UUID> targetPlayerIds) {
         if (targetPlayerIds == null || targetPlayerIds.isEmpty()) {
             this.targetPlayerIds = null;
@@ -220,6 +324,14 @@ public class VideoPlayer {
     }
 
     public boolean load(File videoFile) {
+        return load(videoFile, videoFile, false);
+    }
+
+    public boolean load(File videoFile, File mediaInput) {
+        return load(videoFile, mediaInput, false);
+    }
+
+    public boolean load(File videoFile, File mediaInput, boolean preferDcp2kDecode) {
         if (disposed) return false;
         if (state.get() == State.PLAYING) {
             stop();
@@ -230,6 +342,14 @@ public class VideoPlayer {
         this.sourceName = videoFile.getName();
         this.liveStream = false;
         this.videoTransform = plugin.getVideoTransformManager().get(videoFile);
+        SubtitleSettingsManager.Setting defaultSubtitles = !subtitleCatalog.isEmpty() && DcpComposition.isDcp(videoFile)
+            ? new SubtitleSettingsManager.Setting(true, subtitleCatalog.firstName())
+            : SubtitleSettingsManager.Setting.DEFAULT;
+        setGlobalSubtitleSetting(plugin.getSubtitleSettingsManager().get(videoFile, defaultSubtitles));
+        this.packedRgbOutput = frameProcessor.isExperimentalFilm() && ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN;
+        this.packedRgbFallbackLogged = false;
+        this.packedRgbFrameLogged = false;
+        this.packedRgbImage = null;
         state.set(State.LOADING);
         notifyStateChange();
 
@@ -238,8 +358,25 @@ public class VideoPlayer {
                 grabber.close();
             }
 
-            grabber = new FFmpegFrameGrabber(videoFile);
+            grabber = createLocalGrabber(mediaInput);
             grabber.start();
+            if (preferDcp2kDecode
+                && grabber.getVideoCodec() == org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_JPEG2000
+                && grabber.getImageWidth() >= 3500) {
+                int nativeWidth = grabber.getImageWidth();
+                int nativeHeight = grabber.getImageHeight();
+                grabber.close();
+                grabber = createLocalGrabber(mediaInput);
+                grabber.setVideoOption("lowres", "1");
+                grabber.start();
+                // JPEG 2000 decodes one wavelet level lower; do not convert
+                // the 2K frame back to 4K before fitting it to the screen.
+                grabber.setImageWidth((nativeWidth + 1) / 2);
+                grabber.setImageHeight((nativeHeight + 1) / 2);
+                plugin.getLogger().info("Decoding 4K DCP JPEG 2000 at 2K: "
+                    + nativeWidth + "x" + nativeHeight + " -> "
+                    + grabber.getImageWidth() + "x" + grabber.getImageHeight());
+            }
             return initializeStartedGrabber(videoFile.getName(), false);
         } catch (Exception e) {
             plugin.getLogger().severe("Failed to load video: " + e.getMessage());
@@ -247,6 +384,46 @@ public class VideoPlayer {
             notifyStateChange();
             return false;
         }
+    }
+
+    private FFmpegFrameGrabber createLocalGrabber(File mediaInput) {
+        FFmpegFrameGrabber decoder = new FFmpegFrameGrabber(mediaInput);
+        if (mediaInput.getName().endsWith(".ffconcat")) decoder.setOption("safe", "0");
+        if (packedRgbOutput) decoder.setPixelFormat(org.bytedeco.ffmpeg.global.avutil.AV_PIX_FMT_BGR0);
+        return decoder;
+    }
+
+    private BufferedImage convertLocalFrame(Frame frame) {
+        if (!packedRgbOutput || frame.image == null || frame.image.length == 0
+            || !(frame.image[0] instanceof ByteBuffer bytes)
+            || frame.imageDepth != Frame.DEPTH_UBYTE || frame.imageStride % 4 != 0
+            || frame.imageStride < frame.imageWidth * 4
+            || bytes.limit() < (long) frame.imageStride * frame.imageHeight) {
+            if (packedRgbOutput && !packedRgbFallbackLogged) {
+                packedRgbFallbackLogged = true;
+                plugin.getLogger().warning("Packed RGB frame copy unavailable; using Java2D conversion");
+            }
+            return converter.convert(frame);
+        }
+        int width = frame.imageWidth, height = frame.imageHeight;
+        if (!packedRgbFrameLogged) {
+            packedRgbFrameLogged = true;
+            plugin.getLogger().info("Packed RGB frames: " + width + "x" + height +
+                ", film screen: " + screen.getPixelWidth() + "x" + screen.getPixelHeight());
+        }
+        if (packedRgbImage == null || packedRgbImage.getWidth() != width || packedRgbImage.getHeight() != height) {
+            packedRgbImage = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+        }
+        int[] rgb = ((DataBufferInt) packedRgbImage.getRaster().getDataBuffer()).getData();
+        // FFmpeg BGR0 bytes are B,G,R,0; a little-endian int is 0x00RRGGBB,
+        // exactly the storage used by TYPE_INT_RGB. Bulk-copy padded rows.
+        IntBuffer source = bytes.duplicate().position(0).order(ByteOrder.LITTLE_ENDIAN).asIntBuffer();
+        int stride = frame.imageStride / 4;
+        for (int y = 0; y < height; y++) {
+            source.position(y * stride);
+            source.get(rgb, y * width, width);
+        }
+        return packedRgbImage;
     }
 
     public boolean loadLiveStream(String streamUrl, String displayName) {
@@ -352,6 +529,9 @@ public class VideoPlayer {
 
             plugin.getLogger().info((live ? "Loaded livestream: " : "Loaded video: ") + label);
             plugin.getLogger().info("  Resolution: " + videoWidth + "x" + videoHeight);
+            if (!live && packedRgbOutput) {
+                plugin.getLogger().info("  Experimental output: packed BGR0 with bulk RGB row copies");
+            }
             if (live) {
                 plugin.getLogger().info("  Source frame rate: " + String.format("%.2f", sourceFrameRate) + " fps");
                 plugin.getLogger().info("  Playback frame rate: " + String.format("%.2f", frameRate) + " fps");
@@ -395,14 +575,10 @@ public class VideoPlayer {
         }
     }
 
-    /**
-     * Downscale in FFmpeg's native YUV-to-BGR conversion before Java receives the frame.
-     * The returned image contains only the fitted video content; FrameProcessor adds any
-     * required letter/pillar-boxing before dithering at the final screen resolution.
-     *
-     * Sources smaller than the screen stay at source resolution. Dithering those before
-     * nearest-neighbour palette upscaling is substantially cheaper and preserves the
-     * intentional large-screen pixel aesthetic.
+    /** Fit frames during FFmpeg's native BGR conversion before Java receives them.
+     * Experimental film uses the final fitted dimensions to avoid a Java2D resize.
+     * Standard playback keeps small sources at their original size so palette
+     * upscaling retains its pixelated appearance.
      */
     private void configureDecodeResolution(int sourceWidth, int sourceHeight, int targetWidth, int targetHeight) {
         configureDecodeResolution(grabber, sourceWidth, sourceHeight, targetWidth, targetHeight);
@@ -418,8 +594,10 @@ public class VideoPlayer {
             (double) targetWidth / sourceWidth,
             (double) targetHeight / sourceHeight
         ) * videoTransform.zoom();
-        fitScale = Math.min(1.0, fitScale);
-        if (fitScale >= 1.0) {
+        if (!frameProcessor.isExperimentalFilm() || !videoTransform.isDefault()) {
+            fitScale = Math.min(1.0, fitScale);
+        }
+        if (Math.abs(fitScale - 1.0) < 0.000001) {
             return;
         }
 
@@ -429,9 +607,9 @@ public class VideoPlayer {
         decoder.setImageHeight(decodeHeight);
         decoder.setImageScalingFlags(org.bytedeco.ffmpeg.global.swscale.SWS_BILINEAR);
 
-        plugin.getLogger().info("Downscaling video during decode from " +
+        plugin.getLogger().info("Fitting video during native conversion from " +
             sourceWidth + "x" + sourceHeight + " to " + decodeWidth + "x" + decodeHeight +
-            " before dithering for screen " + screen.getName());
+            " for screen " + screen.getName());
     }
 
     public void play() {
@@ -458,11 +636,17 @@ public class VideoPlayer {
 
         screen.updateViewerCache();
         plugin.getScreenManager().fillScreenWithPlaybackBackground(screen, getPacketRecipients());
+        if (fullscreenPlayback && frameProcessor.isExperimentalFilm()) {
+            frameProcessor.requestFilmAnchor();
+        }
 
         state.set(State.PLAYING);
         notifyStateChange();
 
         screen.startViewerCacheUpdater(plugin, 10L);
+        if (!subtitleCatalog.isEmpty()) {
+            subtitleTask = Bukkit.getScheduler().runTaskTimer(plugin, this::showSubtitleActionBars, 0L, 4L);
+        }
 
         ensureScheduler();
         playbackStartTime = System.nanoTime();
@@ -566,6 +750,11 @@ public class VideoPlayer {
         }
         stopLiveDecoder();
 
+        if (subtitleTask != null) {
+            subtitleTask.cancel();
+            subtitleTask = null;
+        }
+        clearSubtitleActionBars();
         clearDebugActionBars();
 
         disposed = true;
@@ -685,13 +874,14 @@ public class VideoPlayer {
             }
 
             long conversionStart = System.nanoTime();
-            BufferedImage image = converter.convert(frame);
+            BufferedImage image = convertLocalFrame(frame);
             long conversionEnd = System.nanoTime();
             performanceMetrics.recordImageConversion(conversionEnd - conversionStart);
             if (image == null) {
                 plugin.getLogger().warning("Could not convert paused seek frame " + frameNumber);
                 return false;
             }
+            subtitleRenderer.render(image, Math.round(frameNumber * 1_000_000.0 / frameRate));
 
             FrameProcessor.ProcessedFrame processedFrame = frameProcessor.processFrame(
                 image, screen.getPixelWidth(), screen.getPixelHeight(), performanceMetrics, videoTransform
@@ -843,7 +1033,7 @@ public class VideoPlayer {
                 }
 
                 long conversionStart = System.nanoTime();
-                image = converter.convert(frame);
+                image = convertLocalFrame(frame);
                 long conversionEnd = System.nanoTime();
                 if (image == null) {
                     framesSkipped.incrementAndGet();
@@ -851,6 +1041,9 @@ public class VideoPlayer {
                 }
                 performanceMetrics.recordImageConversion(conversionEnd - conversionStart);
                 if (fullscreenSlot != Long.MIN_VALUE) lastFullscreenOutputSlot = fullscreenSlot;
+            }
+            if (!liveStream) {
+                subtitleRenderer.render(image, Math.round(frameNum * 1_000_000.0 / frameRate));
             }
             FrameProcessor.ProcessedFrame processedFrame = frameProcessor.processFrame(
                 image, screen.getPixelWidth(), screen.getPixelHeight(), performanceMetrics, videoTransform
@@ -1355,6 +1548,7 @@ public class VideoPlayer {
             ? (long) measuredFilmBytes
             : (long) (debugCurrentFps * packetDispatcher.getLastFrameBytesSent());
         long decode = performanceMetrics.getLastFrameDecodeUs();
+        long conversion = performanceMetrics.getLastImageConversionUs();
         long dither = performanceMetrics.getLastDitheringUs();
         long upscale = performanceMetrics.getLastUpscalingUs();
         long tiles = performanceMetrics.getLastTileExtractionUs();
@@ -1373,15 +1567,16 @@ public class VideoPlayer {
         String message = String.format(
             "<gray>FPS: <white>%.1f</white> <dark_gray>|</dark_gray> " +
             "T: <white>%.1fms</white> <dark_gray>[</dark_gray>" +
-            "<yellow>D:%.1f</yellow> <gold>" + (frameProcessor.isExperimentalFilm() ? "C:" : "Di:") +
+            "<yellow>D:%.1f</yellow> <yellow>Cv:%.1f</yellow> <gold>" + (frameProcessor.isExperimentalFilm() ? "C:" : "Di:") +
             "%.1f</gold> <gold>U:%.1f</gold> <aqua>Ti:%.1f</aqua> <blue>P:%.1f</blue>" +
             "<dark_gray>]</dark_gray> " +
-            "<dark_gray>|</dark_gray> BW~: <white>%s/s</white> <gray>(%s/f cap:%s)</gray> " +
+            "<dark_gray>|</dark_gray> Raw~: <white>%s/s</white> <gray>(%s/f cap:%s)</gray> " +
             "<dark_gray>|</dark_gray> <light_purple>Tiles:<white>%d</white> MR:<white>%d</white> Avg:<white>%s</white> Save:<white>%.0f%%</white>/<green>%.0f%%</green></light_purple>" +
             " <dark_gray>|</dark_gray> %s <red>Drop:<white>%d</white></red>",
             debugCurrentFps,
             total / 1000.0,
             decode / 1000.0,
+            conversion / 1000.0,
             dither / 1000.0,
             upscale / 1000.0,
             tiles / 1000.0,
@@ -1400,7 +1595,7 @@ public class VideoPlayer {
         Component component = MiniMessage.miniMessage().deserialize(message);
         for (UUID playerId : debugEnabledPlayers) {
             org.bukkit.entity.Player player = org.bukkit.Bukkit.getPlayer(playerId);
-            if (player != null && player.isOnline()) {
+            if (player != null && player.isOnline() && !subtitleActionBarViewers.contains(playerId)) {
                 player.sendActionBar(component);
             }
         }
@@ -1423,9 +1618,9 @@ public class VideoPlayer {
         if (bytes < 1024) {
             return bytes + "B";
         } else if (bytes < 1024 * 1024) {
-            return String.format("%.1fKB", bytes / 1024.0);
+            return String.format("%.1fKiB", bytes / 1024.0);
         } else {
-            return String.format("%.2fMB", bytes / (1024.0 * 1024.0));
+            return String.format("%.2fMiB", bytes / (1024.0 * 1024.0));
         }
     }
 

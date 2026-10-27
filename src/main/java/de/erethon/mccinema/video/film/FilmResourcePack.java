@@ -97,7 +97,7 @@ public final class FilmResourcePack implements Listener {
                 "assets/mcc/shaders/post/fullscreen_present.fsh"));
             if (packKey.fullscreen() && packKey.experimental()) paths.addAll(java.util.List.of(
                 "assets/mcc/shaders/post/fullscreen_decode.fsh",
-                "assets/mcc/shaders/post/anchor_update.fsh"));
+                "assets/mcc/shaders/post/frame_state.fsh"));
             for (String path : paths) {
                 String source = packKey.fullscreen() && !packKey.experimental() && path.endsWith("text.fsh")
                     ? "film-pack/26.3-fullscreen/assets/minecraft/shaders/core/text-map.fsh"
@@ -230,16 +230,6 @@ public final class FilmResourcePack implements Listener {
     public void allowRetry(Player player) {
         if (!isLoaded(player)) requested.remove(player.getUniqueId());
         unsupported.remove(player.getUniqueId());
-    }
-
-    public void releaseFullscreen(Player player) {
-        UUID id = player.getUniqueId();
-        PackKey key = requested.get(id);
-        if (key == null || !key.fullscreen() || !requested.remove(id, key)) return;
-        loaded.remove(id);
-        loadedPack.remove(id);
-        DecoderPack pack = packs.get(key);
-        if (pack != null) player.removeResourcePack(pack.id());
     }
 
     @EventHandler

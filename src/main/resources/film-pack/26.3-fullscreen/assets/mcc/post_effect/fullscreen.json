@@ -1,8 +1,9 @@
 {
   "targets": {
     "resolved": {"width": @FRAME_WIDTH@, "height": @FRAME_HEIGHT@},
-    "anchor": {"width": @FRAME_WIDTH@, "height": @FRAME_HEIGHT@, "persistent": true},
-    "anchor_next": {"width": @FRAME_WIDTH@, "height": @FRAME_HEIGHT@}
+    "previous": {"width": @FRAME_WIDTH@, "height": @FRAME_HEIGHT@, "persistent": true},
+    "state": {"width": 1, "height": 1, "persistent": true},
+    "state_next": {"width": 1, "height": 1}
   },
   "passes": [
     {
@@ -10,25 +11,32 @@
       "fragment_shader": "mcc:post/fullscreen_decode",
       "inputs": [
         {"sampler_name": "Current", "target": "minecraft:main"},
-        {"sampler_name": "Anchor", "target": "anchor"}
+        {"sampler_name": "Previous", "target": "previous"},
+        {"sampler_name": "State", "target": "state"}
       ],
       "output": "resolved"
     },
     {
       "vertex_shader": "minecraft:core/screenquad",
-      "fragment_shader": "mcc:post/anchor_update",
+      "fragment_shader": "mcc:post/frame_state",
       "inputs": [
         {"sampler_name": "Current", "target": "minecraft:main"},
-        {"sampler_name": "Resolved", "target": "resolved"},
-        {"sampler_name": "Anchor", "target": "anchor"}
+        {"sampler_name": "State", "target": "state"},
+        {"sampler_name": "Previous", "target": "previous"}
       ],
-      "output": "anchor_next"
+      "output": "state_next"
     },
     {
       "vertex_shader": "minecraft:core/screenquad",
       "fragment_shader": "mcc:post/copy_current",
-      "inputs": [{"sampler_name": "In", "target": "anchor_next"}],
-      "output": "anchor"
+      "inputs": [{"sampler_name": "In", "target": "state_next"}],
+      "output": "state"
+    },
+    {
+      "vertex_shader": "minecraft:core/screenquad",
+      "fragment_shader": "mcc:post/copy_current",
+      "inputs": [{"sampler_name": "In", "target": "resolved"}],
+      "output": "previous"
     },
     {
       "vertex_shader": "minecraft:core/screenquad",

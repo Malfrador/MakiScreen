@@ -51,7 +51,7 @@ public class ListCommand {
             videosDir.mkdirs();
         }
 
-        File[] files = videosDir.listFiles((dir, name) -> VideoFileTypes.isSupported(name));
+        File[] files = videosDir.listFiles(VideoFileTypes::isPlayable);
 
         if (files == null || files.length == 0) {
             sender.sendMessage(MM.deserialize("<gray>No video files found."));
@@ -62,7 +62,7 @@ public class ListCommand {
         sender.sendMessage(MM.deserialize("<gold><bold>Videos</bold> <gray>(" + files.length + ")"));
 
         for (File file : files) {
-            String size = formatFileSize(file.length());
+            String size = file.isDirectory() ? "DCP" : formatFileSize(file.length());
             sender.sendMessage(MM.deserialize(
                 "  <white>" + file.getName() + "</white> <gray>(" + size + ")"
             ));
@@ -84,9 +84,9 @@ public class ListCommand {
 
     private String formatFileSize(long bytes) {
         if (bytes < 1024) return bytes + " B";
-        if (bytes < 1024 * 1024) return String.format("%.1f KB", bytes / 1024.0);
-        if (bytes < 1024 * 1024 * 1024) return String.format("%.1f MB", bytes / (1024.0 * 1024));
-        return String.format("%.1f GB", bytes / (1024.0 * 1024 * 1024));
+        if (bytes < 1024 * 1024) return String.format("%.1f KiB", bytes / 1024.0);
+        if (bytes < 1024 * 1024 * 1024) return String.format("%.1f MiB", bytes / (1024.0 * 1024));
+        return String.format("%.1f GiB", bytes / (1024.0 * 1024 * 1024));
     }
 
 }

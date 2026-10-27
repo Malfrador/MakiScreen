@@ -7,6 +7,9 @@ import de.erethon.mccinema.download.YoutubeDownloadManager;
 import de.erethon.mccinema.resourcepack.ResourcePackManager;
 import de.erethon.mccinema.screen.Screen;
 import de.erethon.mccinema.video.FrameProcessor;
+import de.erethon.mccinema.video.DcpComposition;
+import de.erethon.mccinema.video.SubtitleCatalog;
+import de.erethon.mccinema.video.SubtitleTrack;
 import de.erethon.mccinema.video.VideoPlayer;
 import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.text.Component;
@@ -22,6 +25,7 @@ import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.scheduler.BukkitTask;
 
 import java.io.File;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
@@ -72,14 +76,18 @@ public class PlayCommand {
             return;
         }
 
-        File videoFile = new File(plugin.getDataFolder(), "videos/" + fileName);
-        if (!videoFile.exists()) {
-            videoFile = new File(plugin.getDataFolder(), fileName);
+        File videoFile = new File(fileName);
+        boolean absoluteSource = videoFile.isAbsolute();
+        if (!absoluteSource) {
+            videoFile = new File(plugin.getDataFolder(), "videos/" + fileName);
+            if (!videoFile.exists()) {
+                videoFile = new File(plugin.getDataFolder(), fileName);
+            }
         }
         if (!videoFile.exists()) {
-            sender.sendMessage(MM.deserialize("<red>Video file '" + fileName + "' not found!"));
-            sender.sendMessage(MM.deserialize("<gray>Place videos in: <white>" +
-                plugin.getDataFolder().getAbsolutePath() + "/videos/"));
+            sender.sendMessage(Component.text("Video file or DCP '" + fileName + "' not found!", NamedTextColor.RED));
+            if (!absoluteSource) sender.sendMessage(Component.text("Place videos in: " +
+                plugin.getDataFolder().getAbsolutePath() + "/videos/", NamedTextColor.GRAY));
             return;
         }
 
@@ -98,6 +106,21 @@ public class PlayCommand {
         new BukkitRunnable() {
             @Override
             public void run() {
+                DcpComposition dcp = null;
+                if (DcpComposition.isDcp(finalVideoFile)) {
+                    try {
+                        dcp = DcpComposition.resolve(finalVideoFile,
+                            new File(plugin.getDataFolder(), "dcp-cache"));
+                    } catch (Exception failure) {
+                        plugin.getLogger().warning("Could not load DCP: " + failure.getMessage());
+                        sender.sendMessage(Component.text("Could not load DCP: " + failure.getMessage(), NamedTextColor.RED));
+                        return;
+                    }
+                }
+                File pictureInput = dcp == null ? finalVideoFile : dcp.picture();
+                File soundInput = dcp == null ? finalVideoFile : dcp.sound();
+                SubtitleCatalog subtitles = dcp == null ? loadVideoSubtitles(finalVideoFile) : dcp.subtitles();
+                boolean dcp2kDecode = dcp != null && experimental;
                 if (experimental || fullscreen) {
                     try {
                         if (experimental && !fullscreen) plugin.getFilmResourcePack().prepare();
@@ -110,6 +133,13 @@ public class PlayCommand {
                 }
                 VideoPlayer player = new VideoPlayer(plugin, screen);
                 player.setTargetPlayerIds(finalTargetPlayerIds);
+                player.setSubtitleCatalog(subtitles);
+                // The decoder chooses its fitted BGR size during load.
+                if (experimental) player.getFrameProcessor().setExperimentalFilm(true);
+                if (subtitles != null && !subtitles.isEmpty()) {
+                    sender.sendMessage(Component.text("Text subtitles: " +
+                        String.join(", ", subtitles.names()), NamedTextColor.GRAY));
+                }
 
                 QualityCommand.applyScreenPreset(player, screen);
 
@@ -118,8 +148,12 @@ public class PlayCommand {
 
                 AudioManager audioManager = null;
 
-                if (withAudio) {
-                    String videoId = finalVideoFile.getName().replaceAll("[^a-zA-Z0-9]", "_").toLowerCase();
+                if (withAudio && soundInput == null) {
+                    sender.sendMessage(Component.text("DCP has no sound track; playing picture only.", NamedTextColor.YELLOW));
+                }
+                if (withAudio && soundInput != null) {
+                    String videoId = finalVideoFile.getName().replaceAll("[^a-zA-Z0-9]", "_").toLowerCase(Locale.ROOT)
+                        + (dcp != null ? "_" + dcp.cacheKey() : absoluteSource ? "_" + externalMediaKey(finalVideoFile) : "");
                     audioManager = new AudioManager(plugin, videoId, finalChunkDurationMs, false, screen);
 
                     String modeInfo = audioManager.isSingleFileMode() ? "single file" :
@@ -127,7 +161,7 @@ public class PlayCommand {
                     sender.sendMessage(MM.deserialize("<yellow>Extracting audio (" + modeInfo + ", global stereo)..."));
 
 
-                    if (audioManager.extractAndSplitAudio(finalVideoFile, createAudioProgressListener(sender))) {
+                    if (audioManager.extractAndSplitAudio(soundInput, createAudioProgressListener(sender))) {
                         File resourcePack = audioManager.generateResourcePack();
                         if (resourcePack != null) {
                             // Host resource pack with configured hosting mode
@@ -176,7 +210,7 @@ public class PlayCommand {
                 new BukkitRunnable() {
                     @Override
                     public void run() {
-                        if (!player.load(finalVideoFile)) {
+                        if (!player.load(finalVideoFile, pictureInput, dcp2kDecode)) {
                             player.shutdown();
                             sender.sendMessage(MM.deserialize("<red>Failed to load video!"));
                             return;
@@ -305,6 +339,53 @@ public class PlayCommand {
                 }.runTask(plugin);
             }
         }.runTaskAsynchronously(plugin);
+    }
+
+    private static String externalMediaKey(File file) {
+        String identity = file.getAbsolutePath() + ':' + file.length() + ':' + file.lastModified();
+        return UUID.nameUUIDFromBytes(identity.getBytes(StandardCharsets.UTF_8))
+            .toString().replace("-", "").substring(0, 16);
+    }
+
+    private SubtitleCatalog loadVideoSubtitles(File videoFile) {
+        String name = videoFile.getName();
+        int dot = name.lastIndexOf('.');
+        String base = dot > 0 ? name.substring(0, dot) : name;
+        java.util.Map<String, SubtitleTrack> tracks = new java.util.LinkedHashMap<>();
+        File[] sidecars = videoFile.getParentFile().listFiles((dir, file) -> {
+            String lower = file.toLowerCase(Locale.ROOT);
+            return lower.endsWith(".srt") && lower.startsWith(base.toLowerCase(Locale.ROOT) + ".");
+        });
+        if (sidecars != null) {
+            java.util.Arrays.sort(sidecars, java.util.Comparator.comparing(File::getName));
+            for (File sidecar : sidecars) {
+                String suffix = sidecar.getName().substring(base.length(), sidecar.getName().length() - 4);
+                String label = suffix.isEmpty() ? "default" : suffix.substring(1).toLowerCase(Locale.ROOT);
+                try {
+                    tracks.put(label, SubtitleTrack.fromSrt(sidecar));
+                } catch (Exception error) {
+                    plugin.getLogger().warning("Could not load subtitle file " + sidecar.getName() +
+                        ": " + error.getMessage());
+                }
+            }
+        }
+        try {
+            File cache = new File(plugin.getDataFolder(), "subtitle-cache");
+            var embedded = plugin.getYoutubeDownloadManager().extractTextSubtitles(videoFile, cache,
+                externalMediaKey(videoFile));
+            for (var entry : embedded.entrySet()) {
+                try {
+                    tracks.putIfAbsent(entry.getKey(), SubtitleTrack.fromSrt(entry.getValue()));
+                } catch (Exception error) {
+                    plugin.getLogger().warning("Could not read embedded subtitle " + entry.getKey() +
+                        ": " + error.getMessage());
+                }
+            }
+        } catch (Exception error) {
+            plugin.getLogger().warning("Could not load text subtitles for " + videoFile.getName() +
+                ": " + error.getMessage());
+        }
+        return new SubtitleCatalog(tracks);
     }
 
     private AudioManager.AudioProgressListener createAudioProgressListener(CommandSender sender) {

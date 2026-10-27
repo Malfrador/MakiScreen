@@ -38,8 +38,8 @@ public final class PlayRequestArgument implements CustomArgumentType.Converted<P
             throw INVALID_REQUEST.create("A video file or URL is required.");
         }
 
-        List<String> tokens = new ArrayList<>(Arrays.asList(input.trim().split("\\s+")));
-        int sourceTokens = sourceTokenCount(tokens);
+        List<String> tokens = tokenize(input.trim());
+        int sourceTokens = sourceTokenCount(tokens, input.trim().startsWith("\""));
         String source = String.join(" ", tokens.subList(0, sourceTokens));
 
         boolean withAudio = false;
@@ -108,7 +108,7 @@ public final class PlayRequestArgument implements CustomArgumentType.Converted<P
     public <S> @NonNull CompletableFuture<Suggestions> listSuggestions(@NonNull CommandContext<S> context, SuggestionsBuilder builder) {
         String remaining = builder.getRemaining();
         File videos = new File(MCCinema.getInstance().getDataFolder(), "videos");
-        String[] files = videos.list((_, name) -> VideoFileTypes.isSupported(name));
+        String[] files = videos.list((dir, name) -> VideoFileTypes.isPlayable(new File(dir, name)));
         if (files != null && !remaining.contains("--")) {
             boolean suggestedFile = false;
             for (String name : files) {
@@ -150,8 +150,8 @@ public final class PlayRequestArgument implements CustomArgumentType.Converted<P
         return current.buildFuture();
     }
 
-    private int sourceTokenCount(List<String> tokens) {
-        if (isUrl(tokens.getFirst())) {
+    private int sourceTokenCount(List<String> tokens, boolean quotedSource) {
+        if (quotedSource || isUrl(tokens.getFirst())) {
             return 1;
         }
 
@@ -174,8 +174,39 @@ public final class PlayRequestArgument implements CustomArgumentType.Converted<P
 
     private boolean localVideoExists(String fileName) {
         MCCinema plugin = MCCinema.getInstance();
+        File direct = new File(fileName);
+        if (direct.isAbsolute()) return direct.exists();
         return new File(plugin.getDataFolder(), "videos/" + fileName).exists()
             || new File(plugin.getDataFolder(), fileName).exists();
+    }
+
+    private List<String> tokenize(String input) throws CommandSyntaxException {
+        List<String> tokens = new ArrayList<>();
+        StringBuilder token = new StringBuilder();
+        boolean quoted = false;
+        boolean started = false;
+        for (int i = 0; i < input.length(); i++) {
+            char character = input.charAt(i);
+            if (character == '"') {
+                quoted = !quoted;
+                started = true;
+            } else if (Character.isWhitespace(character) && !quoted) {
+                if (started) {
+                    tokens.add(token.toString());
+                    token.setLength(0);
+                    started = false;
+                }
+            } else {
+                token.append(character);
+                started = true;
+            }
+        }
+        if (quoted) throw INVALID_REQUEST.create("Unclosed quote in play command.");
+        if (started) tokens.add(token.toString());
+        if (tokens.isEmpty() || tokens.getFirst().isBlank()) {
+            throw INVALID_REQUEST.create("A video file or URL is required.");
+        }
+        return tokens;
     }
 
     private boolean isUrl(String source) {

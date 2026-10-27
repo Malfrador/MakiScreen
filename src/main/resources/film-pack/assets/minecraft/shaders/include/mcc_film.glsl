@@ -14,7 +14,7 @@ int mccSymbol(ivec2 position);
 
 bool mccFullscreenTexture() {
     return textureSize(Sampler0, 0) == ivec2(128, 128)
-        && (mccSymbol(ivec2(127, 15)) == 6 || mccSymbol(ivec2(127, 15)) == 7);
+        && (mccSymbol(ivec2(127, 15)) == 7 || mccSymbol(ivec2(127, 15)) == 11);
 }
 
 bool mccFilmTexture() {
@@ -35,9 +35,9 @@ bool mccFilmTexture() {
     int frameKind = mccSymbol(ivec2(127, 31));
     return mccSymbol(ivec2(79, 31)) == 26
         && mccSymbol(ivec2(95, 31)) == 3
-        && ((version == 6 && mccSymbol(ivec2(111, 31)) == 6
-                && (frameKind == 96 || frameKind == 97))
-            || (version == 7 && mccSymbol(ivec2(111, 31)) == 7 && frameKind == 98));
+        && ((version == 7 && mccSymbol(ivec2(111, 31)) == 7 && frameKind == 98)
+            || (version == 11 && mccSymbol(ivec2(111, 31)) == 11
+                && (frameKind == 99 || frameKind == 100)));
 }
 
 int mccSymbol(ivec2 position) {
@@ -66,6 +66,20 @@ int mccRawBits(ivec2 macro, int bit, int count) {
     if (shift + count > 7) value |= mccMacroSymbol(macro, position + 1) << 7;
     if (shift + count > 14) value |= mccMacroSymbol(macro, position + 2) << 14;
     return (value >> shift) & ((1 << count) - 1);
+}
+
+bool mccPaletteMacro(ivec2 macro) {
+    return mccRawBits(macro, 1784, 1) != 0;
+}
+
+vec3 mccPaletteColor(ivec2 block) {
+    ivec2 macro = block / 4;
+    int within = (block.y % 4) * 4 + block.x % 4;
+    int index = mccRawBits(macro, 96 + within * 2, 2);
+    int base = index * 24;
+    return vec3(float(mccRawBits(macro, base, 8)),
+        float(mccRawBits(macro, base + 8, 8)),
+        float(mccRawBits(macro, base + 16, 8))) / 255.0;
 }
 
 int mccBits(ivec2 macro, int bit, int count) {
@@ -126,6 +140,12 @@ int mccGradientRecord(int index) {
 
 vec2 mccBlockChroma(ivec2 block, ivec2 pixel, int detail) {
     ivec2 macro = block / 4;
+    if (mccPaletteMacro(macro)) {
+        vec3 rgb = 255.0 * mccPaletteColor(block);
+        float y = dot(rgb, vec3(0.299, 0.587, 0.114));
+        return clamp(round(vec2((rgb.b - y) / 1.772, (rgb.r - y) / 1.402)),
+            vec2(-128.0), vec2(127.0));
+    }
     int base = mccRecordBit(block);
     vec2 chroma = vec2(float(mccBits(macro, base + 16, 8)),
         float(mccBits(macro, base + 24, 8))) - 128.0;
@@ -142,6 +162,10 @@ vec2 mccBlockChroma(ivec2 block, ivec2 pixel, int detail) {
 
 float mccBlockMeanLuma(ivec2 block) {
     ivec2 macro = block / 4;
+    if (mccPaletteMacro(macro)) {
+        vec3 rgb = 255.0 * mccPaletteColor(block);
+        return round(dot(rgb, vec3(0.299, 0.587, 0.114)));
+    }
     int base = mccRecordBit(block);
     return 0.5 * float(mccBits(macro, base, 8) + mccBits(macro, base + 8, 8));
 }
@@ -178,14 +202,21 @@ vec2 mccSmoothChroma(ivec2 pixel, int ownDetail) {
 vec3 mccFilmPixel(ivec2 pixel) {
     ivec2 block = pixel / 4;
     ivec2 macro = block / 4;
+    if (mccPaletteMacro(macro)) return mccPaletteColor(block);
     int base = mccRecordBit(block);
     int mode = mccRawBits(macro, 1736 + (base / 109) * 3 + 1, 2);
     if (mode == 3) {
         int dx = mccBits(macro, base, 8);
         int dy = mccBits(macro, base + 8, 8);
-        int sequence = mccBits(macro, base + 16, 8) & 3;
-        return vec3(1.0, float(dx + ((sequence & 1) << 7)) / 255.0,
-            float(dy + ((sequence & 2) << 6)) / 255.0);
+        int residual = mccBits(macro, base + 16, 8);
+        if ((dy & 128) != 0) {
+            int within = (pixel.y % 4) * 4 + pixel.x % 4;
+            int correction = mccBits(macro, base + 32 + within * 3, 3) - 4;
+            int scale = 1 << (residual >> 6);
+            residual = 128 + (residual & 63) - 32 + correction * scale;
+        }
+        return vec3(float(dx + 128) / 255.0, float(dy & 127) / 255.0,
+            float(residual) / 255.0);
     }
     int detail = mccGradientRecord(block.y * 32 + block.x);
     float y = mccLuma(pixel, detail);
@@ -200,4 +231,10 @@ bool mccMotionBlock(ivec2 pixel) {
     ivec2 block = pixel / 4;
     int base = mccRecordBit(block);
     return mccRawBits(block / 4, 1736 + (base / 109) * 3 + 1, 2) == 3;
+}
+
+vec3 mccFrameSequence(int firstSymbol) {
+    return vec3(float(mccSymbol(ivec2((firstSymbol % 8) * 16 + 15, 47))),
+        float(mccSymbol(ivec2(((firstSymbol + 1) % 8) * 16 + 15, 47))),
+        float(mccSymbol(ivec2(((firstSymbol + 2) % 8) * 16 + 15, 47)))) / 255.0;
 }

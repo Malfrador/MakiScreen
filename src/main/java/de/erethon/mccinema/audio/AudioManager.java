@@ -49,10 +49,8 @@ public class AudioManager {
 
     private final AtomicInteger currentChunkIndex = new AtomicInteger(-1);
     private final AtomicBoolean isPlaying = new AtomicBoolean(false);
-    private final Map<UUID, RecentChunks> recentChunks = new ConcurrentHashMap<>();
+    private final Map<UUID, Set<Integer>> startedChunks = new ConcurrentHashMap<>();
     private BukkitTask chunkScheduler;
-
-    private record RecentChunks(int latest, int previous) {}
 
     private long totalDurationMs;
     private long pausedAtMs;
@@ -320,23 +318,21 @@ public class AudioManager {
         for (Player player : getAudioRecipients()) {
             if (playbackFilter.test(player)) {
                 player.playSound(location, key, SoundCategory.RECORDS, 1.0f, 1.0f);
-                recentChunks.compute(player.getUniqueId(), (id, previous) ->
-                    new RecentChunks(chunk.index(), previous == null ? -1 : previous.latest()));
+                startedChunks.computeIfAbsent(player.getUniqueId(), id -> ConcurrentHashMap.newKeySet())
+                    .add(chunk.index());
             }
         }
     }
 
     private void stopAllSounds() {
-        for (var entry : recentChunks.entrySet()) {
+        for (var entry : startedChunks.entrySet()) {
             Player player = Bukkit.getPlayer(entry.getKey());
             if (player == null || !player.isOnline()) continue;
-            RecentChunks recent = entry.getValue();
-            player.stopSound(SOUND_NAMESPACE + ":" + videoId + ".chunk_" + recent.latest());
-            if (recent.previous() >= 0 && recent.previous() != recent.latest()) {
-                player.stopSound(SOUND_NAMESPACE + ":" + videoId + ".chunk_" + recent.previous());
+            for (int index : entry.getValue()) {
+                player.stopSound(SOUND_NAMESPACE + ":" + videoId + ".chunk_" + index, SoundCategory.RECORDS);
             }
         }
-        recentChunks.clear();
+        startedChunks.clear();
     }
 
     private Collection<Player> getAudioRecipients() {

@@ -1,17 +1,10 @@
 package de.erethon.mccinema.video.film;
 
-import java.awt.Graphics2D;
-import java.awt.RenderingHints;
-import java.awt.geom.AffineTransform;
 import java.awt.image.BufferedImage;
-import java.awt.image.ComponentSampleModel;
-import java.awt.image.DataBufferByte;
-import java.awt.image.DataBufferInt;
-import java.awt.image.SinglePixelPackedSampleModel;
 import java.util.Arrays;
 
-/** Version 5: spatial 16x16 carrier regions with independent endpoint, chroma,
- * selector and mode planes. Each region contains sixteen 4x4 image blocks.
+/** 16x16 carrier regions with spatial planes or a shared four-color palette.
+ * Each region contains sixteen 4x4 image blocks.
  * Flat/gradient blocks retain unused selector cells to avoid needless updates.
  */
 public final class FilmCodec {
@@ -21,6 +14,8 @@ public final class FilmCodec {
     public static final int MACRO_SIZE = 16;
     public static final int MACRO_DATA_SYMBOLS = 255;
     public static final int PAYLOAD_END = TILE_SIZE * TILE_SIZE;
+    public static final int FRAME_ID_MASK = (1 << 21) - 1;
+    private static final int SKIPPED_REFERENCE_TOLERANCE = 8;
     private static final int[] MAGIC = {77, 67, 67, 70, 73, 76, 77, 5, 26, 2, 4, 4, 8, 8, 4, 96};
     private static final byte[] SHADOW_SELECTOR = createShadowSelectors();
     private static final float[] CHROMA_FRACTION = {0.625f, 0.875f, 0.125f, 0.375f};
@@ -35,6 +30,9 @@ public final class FilmCodec {
         final int[] cbX = new int[BLOCKS], cbY = new int[BLOCKS];
         final int[] crX = new int[BLOCKS], crY = new int[BLOCKS];
         final int[] motionX = new int[BLOCKS], motionY = new int[BLOCKS];
+        final int[] residual = new int[BLOCKS];
+        final int[] motionDetailScale = new int[BLOCKS];
+        final int[] paletteColor = new int[BLOCKS];
         final int[] corner00 = new int[BLOCKS], corner03 = new int[BLOCKS];
         final int[] corner30 = new int[BLOCKS], corner33 = new int[BLOCKS];
     }
@@ -43,112 +41,69 @@ public final class FilmCodec {
 
     public static BufferedImage fit(BufferedImage source, int width, int height,
                                     double zoom, double focusX, double focusY) {
-        BufferedImage fitted = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
-        fitInto(source, fitted, zoom, focusX, focusY);
-        return fitted;
+        return FilmImageFitter.fit(source, width, height, zoom, focusX, focusY);
     }
 
     public static int[] fitInto(BufferedImage source, BufferedImage fitted,
                                 double zoom, double focusX, double focusY) {
-        if (fitted.getType() != BufferedImage.TYPE_INT_RGB) {
-            throw new IllegalArgumentException("Film target must use TYPE_INT_RGB");
-        }
-        int width = fitted.getWidth(), height = fitted.getHeight();
-        int[] pixels = ((DataBufferInt) fitted.getRaster().getDataBuffer()).getData();
-        Arrays.fill(pixels, 0);
-        double scale = Math.min((double) width / source.getWidth(), (double) height / source.getHeight()) * zoom;
-        double targetX = width / 2.0 - source.getWidth() * scale * focusX;
-        double targetY = height / 2.0 - source.getHeight() * scale * focusY;
-        int integerX = (int) Math.round(targetX), integerY = (int) Math.round(targetY);
-        boolean centered = Math.abs(focusX - 0.5) < 0.000001 && Math.abs(focusY - 0.5) < 0.000001;
-        if (Math.abs(scale - 1.0) < 0.000001
-            && (centered || (Math.abs(targetX - integerX) < 0.000001 && Math.abs(targetY - integerY) < 0.000001))
-            && integerX >= 0 && integerY >= 0
-            && integerX + source.getWidth() <= width && integerY + source.getHeight() <= height) {
-            if (!copyUnscaledPixels(source, pixels, width, integerX, integerY)) {
-                source.getRGB(0, 0, source.getWidth(), source.getHeight(), pixels,
-                    integerY * width + integerX, width);
-            }
-            return pixels;
-        }
-        Graphics2D graphics = fitted.createGraphics();
-        try {
-            graphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
-            AffineTransform placement = new AffineTransform();
-            placement.translate(targetX, targetY);
-            placement.scale(scale, scale);
-            graphics.drawImage(source, placement, null);
-        } finally {
-            graphics.dispose();
-        }
-        return pixels;
+        return FilmImageFitter.fitInto(source, fitted, zoom, focusX, focusY);
     }
-
-    private static boolean copyUnscaledPixels(BufferedImage source, int[] target,
-                                              int targetWidth, int offsetX, int offsetY) {
-        int sourceWidth = source.getWidth(), sourceHeight = source.getHeight();
-        var raster = source.getRaster();
-        if (raster.getSampleModelTranslateX() != 0 || raster.getSampleModelTranslateY() != 0) return false;
-        if (source.getType() == BufferedImage.TYPE_INT_RGB
-            && raster.getDataBuffer() instanceof DataBufferInt buffer
-            && raster.getSampleModel() instanceof SinglePixelPackedSampleModel sampleModel
-            && sampleModel.getScanlineStride() == sourceWidth
-            && buffer.getOffset() == 0 && buffer.getData().length == sourceWidth * sourceHeight) {
-            int[] data = buffer.getData();
-            for (int y = 0; y < sourceHeight; y++) {
-                System.arraycopy(data, y * sourceWidth, target,
-                    (offsetY + y) * targetWidth + offsetX, sourceWidth);
-            }
-            return true;
-        }
-        if (source.getType() == BufferedImage.TYPE_3BYTE_BGR
-            && raster.getDataBuffer() instanceof DataBufferByte buffer
-            && raster.getSampleModel() instanceof ComponentSampleModel sampleModel
-            && sampleModel.getPixelStride() == 3
-            && sampleModel.getScanlineStride() == sourceWidth * 3
-            && Arrays.equals(sampleModel.getBandOffsets(), new int[]{2, 1, 0})
-            && buffer.getOffset() == 0 && buffer.getData().length == sourceWidth * sourceHeight * 3) {
-            byte[] data = buffer.getData();
-            for (int y = 0; y < sourceHeight; y++) {
-                int sourceOffset = y * sourceWidth * 3;
-                int targetOffset = (offsetY + y) * targetWidth + offsetX;
-                for (int x = 0; x < sourceWidth; x++) {
-                    int blue = data[sourceOffset++] & 255;
-                    int green = data[sourceOffset++] & 255;
-                    int red = data[sourceOffset++] & 255;
-                    target[targetOffset + x] = red << 16 | green << 8 | blue;
-                }
-            }
-            return true;
-        }
-        return false;
-    }
-
     public static byte[] encodeTile(int[] rgb, int stride, int originX, int originY) {
         return encodeTile(rgb, stride, originX, originY, null);
     }
 
     public static byte[] encodeTile(int[] rgb, int stride, int originX, int originY, byte[] previous) {
-        return encodeTile(rgb, stride, originX, originY, previous, null, 0, 0, 0, 0, null, 0);
+        return encodeTile(rgb, stride, originX, originY, previous, null, null, 0, 0, 0, 0, false, null, 0);
     }
 
     private static byte[] encodeTile(int[] rgb, int stride, int originX, int originY,
-                                     byte[] previous, int[] anchorPixels, int height,
-                                     int motionX, int motionY, int temporalTolerance,
+                                     byte[] previous, int[] anchorPixels, int[] olderPixels, int height,
+                                     int motionX, int motionY, int temporalTolerance, boolean paletteEnabled,
                                      int[] motionBlockCounts, int tileIndex) {
-        byte[] result = new byte[TILE_SIZE * TILE_SIZE];
-        Arrays.fill(result, (byte) 4);
         boolean reusePrevious = isEncoded(previous);
         boolean reuseFullscreen = anchorPixels != null && isFullscreenEncoded(previous);
+        byte[] result = reuseFullscreen ? previous.clone() : new byte[TILE_SIZE * TILE_SIZE];
+        if (!reuseFullscreen) Arrays.fill(result, (byte) 4);
         int[] luma = new int[16];
         int[] shadowSelectors = new int[16];
         double[] cbValues = new double[16];
         double[] crValues = new double[16];
+        boolean[] paletteRegions = paletteEnabled ? new boolean[64] : null;
+        boolean[] previousPalette = paletteEnabled ? new boolean[64] : null;
+        int[] spatialRegions = paletteEnabled ? new int[64] : null;
+        if (paletteEnabled && reuseFullscreen) {
+            for (int my = 0; my < 8; my++) {
+                for (int mx = 0; mx < 8; mx++) {
+                    int region = my * 8 + mx;
+                    if (!FilmRegionPalette.isPalette(previous, mx, my)) continue;
+                    previousPalette[region] = true;
+                    int[] palette = FilmRegionPalette.find(rgb, stride, originX, originY, mx, my);
+                    if (palette != null) {
+                        FilmRegionPalette.write(result, mx, my, palette);
+                        paletteRegions[region] = true;
+                    } else {
+                        FilmRegionPalette.clear(result, mx, my);
+                    }
+                }
+            }
+        }
+        int[] localVectors = anchorPixels == null ? null : FilmLocalMotion.estimateTile(
+            rgb, anchorPixels, stride, height, originX, originY, motionX, motionY, paletteRegions);
         for (int by = 0; by < 32; by++) {
             for (int bx = 0; bx < 32; bx++) {
-                if (anchorPixels != null && writeMotionBlock(result, previous, reuseFullscreen,
-                    rgb, anchorPixels, stride, height, originX, originY, bx, by,
-                    motionX, motionY, temporalTolerance)) {
+                int macroX = bx / 4, macroY = by / 4;
+                int region = macroY * 8 + macroX;
+                if (paletteEnabled && paletteRegions[region]) continue;
+                boolean priorPalette = paletteEnabled && previousPalette[region];
+                int recordBit = ((by & 3) * 4 + (bx & 3)) * RECORD_BITS;
+                if (anchorPixels != null
+                    && writeMotionBlock(result, previous, reuseFullscreen && !priorPalette,
+                    rgb, anchorPixels, olderPixels, stride, height, originX, originY, bx, by,
+                    motionX, motionY, localVectors[macroY * 8 + macroX], temporalTolerance)) {
+                    // The predictor has already checked every output channel of
+                    // all 16 pixels against the quality limit. A motion record
+                    // changes only its vector, residual and mode symbols; doing
+                    // a full spatial encode to compare it is the hot path.
                     if (motionBlockCounts != null) motionBlockCounts[tileIndex]++;
                     continue;
                 }
@@ -172,9 +127,6 @@ public final class FilmCodec {
                         cr += crValues[pixel];
                     }
                 }
-                int macroX = bx / 4;
-                int macroY = by / 4;
-                int recordBit = ((by & 3) * 4 + (bx & 3)) * RECORD_BITS;
                 double averageCb = cb / 16;
                 double averageCr = cr / 16;
                 int cbByte = clamp((int) Math.round(128 + averageCb));
@@ -187,7 +139,8 @@ public final class FilmCodec {
                 // Retain those carrier bytes across fullscreen interframes too;
                 // a prior motion block has no spatial selectors to preserve.
                 boolean previousSpatial = reusePrevious
-                    || (reuseFullscreen && mode(previous, macroX, macroY, recordBit) != 3);
+                    || (reuseFullscreen && !priorPalette
+                        && mode(previous, macroX, macroY, recordBit) != 3);
                 selectBlockMode(result, previousSpatial ? previous : null, macroX, macroY, recordBit,
                     min, max, shadowCurve, luma);
                 // Reuse only earlier spatial records. Fullscreen motion records
@@ -197,6 +150,21 @@ public final class FilmCodec {
                     && visuallyEquivalent(result, previous, macroX, macroY, recordBit)) {
                     copyRecord(previous, result, macroX, macroY, recordBit);
                 }
+                if (paletteEnabled) spatialRegions[region]++;
+            }
+        }
+        if (paletteEnabled) {
+            for (int my = 0; my < 8; my++) {
+                for (int mx = 0; mx < 8; mx++) {
+                    int region = my * 8 + mx;
+                    if (paletteRegions[region]) continue;
+                    FilmRegionPalette.clearFlag(result, mx, my);
+                    if (spatialRegions[region] < 8) continue;
+                    if (anchorPixels != null && reuseFullscreen
+                        && FilmRegionPalette.changedSymbols(result, previous, mx, my) < 40) continue;
+                    int[] palette = FilmRegionPalette.find(rgb, stride, originX, originY, mx, my);
+                    if (palette != null) FilmRegionPalette.write(result, mx, my, palette);
+                }
             }
         }
         for (int i = 0; i < MAGIC.length; i++) {
@@ -205,58 +173,85 @@ public final class FilmCodec {
         return result;
     }
 
-    /** Version 6 stores a tile address and may copy 4x4 blocks from the retained anchor. */
-    public static byte[] encodeFullscreenTile(int[] rgb, int[] anchorPixels, int stride, int height,
+    /** Version 11 adds region palettes to the rolling-reference motion codec. */
+    public static byte[] encodeFullscreenTile(int[] rgb, int[] referencePixels, int stride, int height,
                                                int tileX, int tileY, int tilesWide, int tilesHigh,
                                                byte[] previousTile, int motionX, int motionY,
-                                               boolean anchor, int temporalTolerance) {
-        return encodeFullscreenTile(rgb, anchorPixels, stride, height, tileX, tileY,
-            tilesWide, tilesHigh, previousTile, motionX, motionY, anchor,
-            temporalTolerance, null, 0);
+                                               boolean keyframe, int temporalTolerance,
+                                               int frameId, int referenceId) {
+        return encodeFullscreenTile(rgb, referencePixels, stride, height, tileX, tileY,
+            tilesWide, tilesHigh, previousTile, motionX, motionY, keyframe,
+            temporalTolerance, frameId, referenceId, null, 0);
     }
 
-    public static byte[] encodeFullscreenTile(int[] rgb, int[] anchorPixels, int stride, int height,
+    public static byte[] encodeFullscreenTile(int[] rgb, int[] referencePixels, int stride, int height,
                                                int tileX, int tileY, int tilesWide, int tilesHigh,
                                                byte[] previousTile, int motionX, int motionY,
-                                               boolean anchor, int temporalTolerance,
+                                               boolean keyframe, int temporalTolerance,
+                                               int frameId, int referenceId,
+                                               int[] motionBlockCounts, int tileIndex) {
+        return encodeFullscreenTile(rgb, referencePixels, null, stride, height,
+            tileX, tileY, tilesWide, tilesHigh, previousTile, motionX, motionY,
+            keyframe, temporalTolerance, frameId, referenceId, motionBlockCounts, tileIndex);
+    }
+
+    /** Spatially encode blocks whose prediction would be wrong after one missed render. */
+    public static byte[] encodeFullscreenTile(int[] rgb, int[] referencePixels, int[] olderPixels,
+                                               int stride, int height,
+                                               int tileX, int tileY, int tilesWide, int tilesHigh,
+                                               byte[] previousTile, int motionX, int motionY,
+                                               boolean keyframe, int temporalTolerance,
+                                               int frameId, int referenceId,
                                                int[] motionBlockCounts, int tileIndex) {
         int originX = tileX * TILE_SIZE, originY = tileY * TILE_SIZE;
         byte[] data = encodeTile(rgb, stride, originX, originY, previousTile,
-            anchor ? null : anchorPixels, height, motionX, motionY, temporalTolerance,
-            motionBlockCounts, tileIndex);
-        int[] header = {77, 67, 67, 70, 73, 76, 77, 6,
-            tileX, tileY, tilesWide, tilesHigh, 26, 3, 6, anchor ? 97 : 96};
+            keyframe ? null : referencePixels, olderPixels, height, motionX, motionY,
+            temporalTolerance, true, motionBlockCounts, tileIndex);
+        int[] header = {77, 67, 67, 70, 73, 76, 77, 11,
+            tileX, tileY, tilesWide, tilesHigh, 26, 3, 11, keyframe ? 100 : 99};
         for (int i = 0; i < header.length; i++) setSymbol(data, i % 8, i / 8, 255, header[i]);
+        if (tileX == 0 && tileY == 0) {
+            for (int i = 0; i < 3; i++) {
+                setSymbol(data, i, 2, 255, (frameId >>> (7 * i)) & 127);
+                setSymbol(data, i + 3, 2, 255, (referenceId >>> (7 * i)) & 127);
+            }
+        }
         return data;
     }
 
     private static boolean writeMotionBlock(byte[] data, byte[] previous, boolean reusePrevious,
-                                            int[] rgb, int[] anchorPixels, int stride, int height,
+                                            int[] rgb, int[] anchorPixels, int[] olderPixels,
+                                            int stride, int height,
                                             int originX, int originY, int bx, int by,
-                                            int motionX, int motionY, int tolerance) {
+                                            int motionX, int motionY, int localVector, int tolerance) {
         int x = originX + bx * 4, y = originY + by * 4;
-        boolean stationary = motionMatch(rgb, anchorPixels, stride, height, x, y, 0, 0, tolerance);
+        int residual = motionResidual(rgb, anchorPixels, stride, height, x, y, 0, 0, tolerance);
+        long detailed = -1;
+        boolean stationary = residual != Integer.MIN_VALUE;
         int dx = stationary ? 0 : motionX, dy = stationary ? 0 : motionY;
         int mx = bx / 4, my = by / 4;
         int base = ((by & 3) * 4 + (bx & 3)) * RECORD_BITS;
         if (!stationary) {
             int movingTolerance = Math.max(2, tolerance / 2);
-            boolean matched = (dx != 0 || dy != 0)
-                && motionInBounds(stride, height, x, y, dx, dy)
-                && motionMatch(rgb, anchorPixels, stride, height, x, y, dx, dy, movingTolerance);
+            residual = (dx != 0 || dy != 0)
+                ? motionResidual(rgb, anchorPixels, stride, height, x, y, dx, dy, movingTolerance)
+                : Integer.MIN_VALUE;
+            boolean matched = residual != Integer.MIN_VALUE;
             if (!matched && reusePrevious && mode(previous, mx, my, base) == 3) {
                 int priorX = get(previous, mx, my, base, 8) - 64;
-                int priorY = get(previous, mx, my, base + 8, 8) - 64;
+                int priorY = (get(previous, mx, my, base + 8, 8) & 127) - 64;
                 for (int i = 0; i < LOCAL_MOTION_X.length; i++) {
                     int candidateX = priorX + LOCAL_MOTION_X[i], candidateY = priorY + LOCAL_MOTION_Y[i];
                     if (candidateX < -64 || candidateX > 63 || candidateY < -64 || candidateY > 63
                         || (candidateX == 0 && candidateY == 0)
                         || (candidateX == motionX && candidateY == motionY)
                         || !motionInBounds(stride, height, x, y, candidateX, candidateY)) continue;
-                    if (motionMatch(rgb, anchorPixels, stride, height, x, y,
-                        candidateX, candidateY, movingTolerance)) {
+                    int candidateResidual = motionResidual(rgb, anchorPixels, stride, height, x, y,
+                        candidateX, candidateY, movingTolerance);
+                    if (candidateResidual != Integer.MIN_VALUE) {
                         dx = candidateX;
                         dy = candidateY;
+                        residual = candidateResidual;
                         matched = true;
                         break;
                     }
@@ -272,46 +267,117 @@ public final class FilmCodec {
                 if (nx < 0 || ny < 0) continue;
                 byte[] carrier = neighbor < 2 ? data : previous;
                 int neighborMx = nx / 4, neighborMy = ny / 4;
+                if (FilmRegionPalette.isPalette(carrier, neighborMx, neighborMy)) continue;
                 int neighborBase = ((ny & 3) * 4 + (nx & 3)) * RECORD_BITS;
                 if (mode(carrier, neighborMx, neighborMy, neighborBase) != 3) continue;
                 int candidateX = get(carrier, neighborMx, neighborMy, neighborBase, 8) - 64;
-                int candidateY = get(carrier, neighborMx, neighborMy, neighborBase + 8, 8) - 64;
+                int candidateY = (get(carrier, neighborMx, neighborMy, neighborBase + 8, 8) & 127) - 64;
                 if ((candidateX == 0 && candidateY == 0)
                     || (candidateX == motionX && candidateY == motionY)
                     || !motionInBounds(stride, height, x, y, candidateX, candidateY)) continue;
-                if (motionMatch(rgb, anchorPixels, stride, height, x, y,
-                    candidateX, candidateY, movingTolerance)) {
+                int candidateResidual = motionResidual(rgb, anchorPixels, stride, height, x, y,
+                    candidateX, candidateY, movingTolerance);
+                if (candidateResidual != Integer.MIN_VALUE) {
                     dx = candidateX;
                     dy = candidateY;
+                    residual = candidateResidual;
                     matched = true;
                 }
             }
-            if (!matched) return false;
+            if (!matched && localVector != 0) {
+                int localX = (localVector >>> 8) - 64;
+                int localY = (localVector & 255) - 64;
+                if ((localX != motionX || localY != motionY)
+                    && motionInBounds(stride, height, x, y, localX, localY)) {
+                    int candidateResidual = motionResidual(rgb, anchorPixels, stride, height,
+                        x, y, localX, localY, movingTolerance);
+                    if (candidateResidual != Integer.MIN_VALUE) {
+                        dx = localX;
+                        dy = localY;
+                        residual = candidateResidual;
+                        matched = true;
+                    }
+                }
+            }
+            if (!matched) {
+                detailed = FilmMotionDetail.fit(rgb, anchorPixels, stride, height,
+                    x, y, 0, 0, tolerance);
+                if (detailed >= 0) {
+                    dx = 0;
+                    dy = 0;
+                } else if (motionX != 0 || motionY != 0) {
+                    detailed = FilmMotionDetail.fit(rgb, anchorPixels, stride, height,
+                        x, y, motionX, motionY, movingTolerance);
+                    dx = motionX;
+                    dy = motionY;
+                }
+                if (detailed < 0) return false;
+                residual = FilmMotionDetail.dc(detailed);
+            }
         }
-        if (reusePrevious) copyRecord(previous, data, mx, my, base);
+        if (olderPixels != null && !safeAfterSkippedFrame(anchorPixels, olderPixels,
+            stride, x, y, dx, dy)) return false;
+        // Fullscreen interframes start as a copy of the prior carrier, so the
+        // unused fields remain stable without copying 109 bits for each block.
+        if (!reusePrevious || mode(previous, mx, my, base) != 3
+            || ((get(previous, mx, my, base + 8, 8) & 128) != 0) != (detailed >= 0)) {
+            // Spatial selectors left in motion blocks are high-entropy padding
+            // inside rectangular map patches. Canonicalize them once so packet
+            // compression can represent repeated motion regions cheaply.
+            FilmCarrierMasks.clearMotionPadding(data, mx, my, base / RECORD_BITS);
+        }
         put(data, mx, my, base, 8, dx + 64);
-        put(data, mx, my, base + 8, 8, dy + 64);
-        put(data, mx, my, base + 16, 8, 0);
+        put(data, mx, my, base + 8, 8, dy + 64 | (detailed >= 0 ? 128 : 0));
+        int residualByte = detailed >= 0
+            ? residual + 32 | (Long.numberOfTrailingZeros(FilmMotionDetail.scale(detailed)) << 6)
+            : residual + 128;
+        put(data, mx, my, base + 16, 8, residualByte);
+        if (detailed >= 0) {
+            for (int pixel = 0; pixel < 16; pixel++) {
+                put(data, mx, my, base + 32 + pixel * 3, 3,
+                    FilmMotionDetail.correction(detailed, pixel) + 4);
+            }
+        }
         putRaw(data, mx, my, 1736 + (base / RECORD_BITS) * 3 + 1, 2, 3);
         return true;
     }
 
-    /** Reconstruct the picture the fullscreen shaders retain, using the finalized tile carrier. */
+    /** Reconstruct exactly the quantized picture retained by the fullscreen shader. */
     public static void reconstructFullscreenTile(byte[] data, int[] anchorPixels, int[] reconstructed,
                                                   int stride, int height, int originX, int originY) {
         DecodeScratch scratch = DECODE_SCRATCH.get();
-        boolean anchorMarker = originX == 0 && originY == 0
-            && getSymbol(data, 7, 1, 255) == 97;
+        boolean metadataBlock = originX == 0 && originY == 0;
         for (int by = 0; by < 32; by++) {
             for (int bx = 0; bx < 32; bx++) {
                 int index = by * 32 + bx;
                 int mx = bx / 4, my = by / 4;
                 int base = ((by & 3) * 4 + (bx & 3)) * RECORD_BITS;
+                if (FilmRegionPalette.isPalette(data, mx, my)) {
+                    int color = FilmRegionPalette.color(data, mx, my,
+                        (by & 3) * 4 + (bx & 3));
+                    scratch.mode[index] = 4;
+                    scratch.paletteColor[index] = color;
+                    int red = color >>> 16 & 255, green = color >>> 8 & 255, blue = color & 255;
+                    double luma = 0.299 * red + 0.587 * green + 0.114 * blue;
+                    scratch.low[index] = scratch.high[index] = clamp((int) Math.round(luma));
+                    scratch.cb[index] = clamp((int) Math.round(128 + (blue - luma) / 1.772)) - 128;
+                    scratch.cr[index] = clamp((int) Math.round(128 + (red - luma) / 1.402)) - 128;
+                    scratch.cbX[index] = scratch.cbY[index] = 0;
+                    scratch.crX[index] = scratch.crY[index] = 0;
+                    scratch.detail[index] = 0;
+                    continue;
+                }
                 int mode = mode(data, mx, my, base);
                 scratch.mode[index] = mode;
                 if (mode == 3) {
                     scratch.motionX[index] = get(data, mx, my, base, 8) - 64;
-                    scratch.motionY[index] = get(data, mx, my, base + 8, 8) - 64;
+                    int vertical = get(data, mx, my, base + 8, 8);
+                    int residualByte = get(data, mx, my, base + 16, 8);
+                    scratch.motionY[index] = (vertical & 127) - 64;
+                    scratch.motionDetailScale[index] = (vertical & 128) == 0
+                        ? 0 : 1 << (residualByte >>> 6);
+                    scratch.residual[index] = (vertical & 128) == 0
+                        ? residualByte - 128 : (residualByte & 63) - 32;
                     continue;
                 }
                 scratch.low[index] = get(data, mx, my, base, 8);
@@ -339,17 +405,31 @@ public final class FilmCodec {
                     int py = by * 4 + iy, y = originY + py;
                     for (int ix = 0; ix < 4; ix++) {
                         int px = bx * 4 + ix, x = originX + px;
-                        if (anchorMarker && px < 4 && py < 4) {
+                        if (metadataBlock && py < 16
+                            && (px < 16 || (px >= 48 && px < 64)
+                                || (px >= 96 && px < 112))) {
                             reconstructed[y * stride + x] = 0;
                             continue;
                         }
-                        if (scratch.mode[index] == 3) {
+                        if (scratch.mode[index] == 4) {
+                            reconstructed[y * stride + x] = FilmPixelMath.quantizeSpatialRed(
+                                scratch.paletteColor[index]);
+                        } else if (scratch.mode[index] == 3) {
                             if (anchorPixels == null) throw new IllegalStateException("Temporal block without anchor");
                             int sourceX = clamp(x + scratch.motionX[index], 0, stride - 1);
                             int sourceY = clamp(y + scratch.motionY[index], 0, height - 1);
-                            reconstructed[y * stride + x] = anchorPixels[sourceY * stride + sourceX];
+                            int color = anchorPixels[sourceY * stride + sourceX];
+                            int residual = scratch.residual[index];
+                            if (scratch.motionDetailScale[index] != 0) {
+                                int base = ((by & 3) * 4 + (bx & 3)) * RECORD_BITS;
+                                int pixel = iy * 4 + ix;
+                                residual += (get(data, bx / 4, by / 4, base + 32 + pixel * 3, 3) - 4)
+                                    * scratch.motionDetailScale[index];
+                            }
+                            reconstructed[y * stride + x] = FilmPixelMath.applyResidual(color, residual);
                         } else {
-                            reconstructed[y * stride + x] = decodeFreshPixel(data, scratch, index, bx, by, px, py);
+                            reconstructed[y * stride + x] = FilmPixelMath.quantizeSpatialRed(
+                                decodeFreshPixel(data, scratch, index, bx, by, px, py));
                         }
                     }
                 }
@@ -415,7 +495,7 @@ public final class FilmCodec {
             cb = s.cb[index] + s.cbX[index] * localX + s.cbY[index] * localY;
             cr = s.cr[index] + s.crX[index] * localX + s.crY[index] * localY;
         }
-        int red = Math.min(254, clamp(Math.round(luma + 1.402f * cr)));
+        int red = clamp(Math.round(luma + 1.402f * cr));
         int green = clamp(Math.round(luma - 0.344136f * cb - 0.714136f * cr));
         int blue = clamp(Math.round(luma + 1.772f * cb));
         return red << 16 | green << 8 | blue;
@@ -427,11 +507,11 @@ public final class FilmCodec {
         return low + (high - low) * fraction;
     }
 
-    private static boolean motionMatch(int[] current, int[] previous, int stride, int height,
-                                       int x, int y, int dx, int dy, int tolerance) {
-        if (!motionInBounds(stride, height, x, y, dx, dy)) return false;
+    private static int motionResidual(int[] current, int[] previous, int stride, int height,
+                                      int x, int y, int dx, int dy, int tolerance) {
+        if (!motionInBounds(stride, height, x, y, dx, dy)) return Integer.MIN_VALUE;
         int minRed = 255, maxRed = 0, minGreen = 255, maxGreen = 0, minBlue = 255, maxBlue = 0;
-        int largestDifference = 0;
+        int differenceSum = 0, zeroResidualError = 0;
         for (int row = 0; row < 4; row++) {
             for (int col = 0; col < 4; col++) {
                 int a = current[(y + row) * stride + x + col];
@@ -443,17 +523,52 @@ public final class FilmCodec {
                 maxGreen = Math.max(maxGreen, green);
                 minBlue = Math.min(minBlue, blue);
                 maxBlue = Math.max(maxBlue, blue);
-                largestDifference = Math.max(largestDifference,
-                    Math.max(Math.abs(red - ((b >>> 16) & 255)),
-                        Math.max(Math.abs(green - ((b >>> 8) & 255)), Math.abs(blue - (b & 255)))));
-                if (largestDifference > tolerance) return false;
+                int redDelta = red - ((b >>> 16) & 255);
+                int greenDelta = green - ((b >>> 8) & 255);
+                int blueDelta = blue - (b & 255);
+                differenceSum += redDelta + greenDelta + blueDelta;
+                zeroResidualError = Math.max(zeroResidualError, Math.max(Math.abs(redDelta),
+                    Math.max(Math.abs(greenDelta), Math.abs(blueDelta))));
             }
         }
         int localRange = Math.max(maxRed - minRed,
             Math.max(maxGreen - minGreen, maxBlue - minBlue));
         int allowed = localRange <= 20 ? Math.min(tolerance, 4)
             : localRange <= 40 ? Math.min(tolerance, 8) : tolerance;
-        return largestDifference <= allowed;
+        // Stable blocks do not need a new residual symbol on every small
+        // source fluctuation. The rolling reference itself retains the pixel.
+        if (zeroResidualError <= allowed) return 0;
+        int residual = clamp(Math.round(differenceSum / 48.0f), -128, 127);
+        int largestDifference = 0;
+        for (int row = 0; row < 4; row++) {
+            for (int col = 0; col < 4; col++) {
+                int a = current[(y + row) * stride + x + col];
+                int b = previous[(y + row + dy) * stride + x + col + dx];
+                int red = (a >>> 16) & 255, green = (a >>> 8) & 255, blue = a & 255;
+                largestDifference = Math.max(largestDifference,
+                    Math.max(Math.abs(red - clamp(((b >>> 16) & 255) + residual)),
+                        Math.max(Math.abs(green - clamp(((b >>> 8) & 255) + residual)),
+                            Math.abs(blue - clamp((b & 255) + residual)))));
+                if (largestDifference > allowed) return Integer.MIN_VALUE;
+            }
+        }
+        return residual;
+    }
+
+    private static boolean safeAfterSkippedFrame(int[] previous, int[] older,
+                                                  int stride, int x, int y, int dx, int dy) {
+        for (int row = 0; row < 4; row++) {
+            int offset = (y + row + dy) * stride + x + dx;
+            for (int col = 0; col < 4; col++) {
+                int a = previous[offset + col], b = older[offset + col];
+                if (Math.abs((a >>> 16 & 255) - (b >>> 16 & 255)) > SKIPPED_REFERENCE_TOLERANCE
+                    || Math.abs((a >>> 8 & 255) - (b >>> 8 & 255)) > SKIPPED_REFERENCE_TOLERANCE
+                    || Math.abs((a & 255) - (b & 255)) > SKIPPED_REFERENCE_TOLERANCE) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     private static boolean motionInBounds(int stride, int height, int x, int y, int dx, int dy) {
@@ -465,11 +580,11 @@ public final class FilmCodec {
         for (int i = 0; i < 7; i++) {
             if (getSymbol(bytes, i % 8, i / 8, 255) != MAGIC[i]) return false;
         }
-        return getSymbol(bytes, 7, 0, 255) == 6;
+        return getSymbol(bytes, 7, 0, 255) == 11;
     }
 
     public static boolean isFullscreenAnchor(byte[] bytes) {
-        return isFullscreenEncoded(bytes) && getSymbol(bytes, 7, 1, 255) == 97;
+        return isFullscreenEncoded(bytes) && getSymbol(bytes, 7, 1, 255) == 100;
     }
 
     // Keep all endpoint/chroma precision. Compact modes only approximate luma,
@@ -669,13 +784,10 @@ public final class FilmCodec {
         double gradientError = error(cb, averageCb, cbX, cbY)
             + error(cr, averageCr, crX, crY);
         boolean useful = gradientError + 4 < flatError * 0.9;
-        if (useful) {
-            put(result, macroX, macroY, recordBit + 96, 3, cbX & 7);
-            put(result, macroX, macroY, recordBit + 99, 3, cbY & 7);
-            put(result, macroX, macroY, recordBit + 102, 3, crX & 7);
-            put(result, macroX, macroY, recordBit + 105, 3, crY & 7);
-        }
-        if (shadowCurve) put(result, macroX, macroY, recordBit + 108, 1, 1);
+        int detail = shadowCurve ? 4096 : 0;
+        if (useful) detail |= (cbX & 7) | ((cbY & 7) << 3)
+            | ((crX & 7) << 6) | ((crY & 7) << 9);
+        put(result, macroX, macroY, recordBit + 96, 13, detail);
     }
 
     private static double slope(double[] values, boolean horizontal) {

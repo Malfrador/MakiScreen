@@ -6,7 +6,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
 
-Ca/** Standalone check that cheaper patch plans still reproduce every carrier byte. */
+/** Standalone check that cheaper patch plans still reproduce every carrier byte. */
 public final class FilmPatchPlannerTest {
     public static void main(String[] args) {
         Random random = new Random(0x50415443484cL);

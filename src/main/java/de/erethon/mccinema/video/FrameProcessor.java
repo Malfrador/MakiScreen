@@ -44,6 +44,18 @@ public class FrameProcessor {
         return filmFrameProcessor.getTemporalTolerance();
     }
 
+    public void setFilmFlatFilter(int channelRange, int colorStep) {
+        filmFrameProcessor.setFlatFilter(channelRange, colorStep);
+    }
+
+    public int getFilmFlatRange() {
+        return filmFrameProcessor.getFlatRange();
+    }
+
+    public int getFilmFlatColorStep() {
+        return filmFrameProcessor.getFlatColorStep();
+    }
+
     public void requestFilmAnchor() {
         filmFrameProcessor.requestAnchor();
     }
@@ -134,7 +146,10 @@ public class FrameProcessor {
         this.previousDitheredFrame = new byte[frameWidth * frameHeight];
         this.previousSourceHash = new int[frameWidth * frameHeight];
         loadDitheringConfig(plugin.getConfig());
-        int threads = Math.max(2, Runtime.getRuntime().availableProcessors() / 2);
+        int availableCores = Runtime.getRuntime().availableProcessors();
+        int defaultFilmThreads = Math.min(8, Math.max(2, availableCores - 1));
+        int threads = Math.max(configuredThreads(plugin.getConfig(), "performance.processing-threads", 4),
+            configuredThreads(plugin.getConfig(), "performance.experimental-film-threads", defaultFilmThreads));
         this.executor = Executors.newFixedThreadPool(threads, r -> {
             Thread t = new Thread(r, "MCCinema-FrameProcessor");
             t.setDaemon(true);
@@ -143,6 +158,10 @@ public class FrameProcessor {
         this.filmFrameProcessor = new de.erethon.mccinema.video.film.FilmFrameProcessor(executor,
             plugin.getConfig().getLong("performance.bandwidth.film-temporal-target-bytes-per-second",
                 9L * 1024L * 1024L));
+    }
+
+    private static int configuredThreads(FileConfiguration config, String key, int fallback) {
+        return Math.max(1, Math.min(32, config.getInt(key, fallback)));
     }
 
     private void loadDitheringConfig(FileConfiguration config) {

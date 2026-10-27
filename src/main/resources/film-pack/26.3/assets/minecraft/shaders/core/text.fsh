@@ -68,12 +68,26 @@ void main() {
             #endif
             return;
         }
-        bool anchorMarker = fullscreen && mccSymbol(ivec2(127, 31)) == 97
-            && mccSymbol(ivec2(15, 31)) == 0 && mccSymbol(ivec2(31, 31)) == 0
-            && all(lessThan(pixel, ivec2(4)));
-        vec3 decoded = mccFilmPixel(pixel);
-        if (anchorMarker) decoded = vec3(1.0, 0.0, 0.0);
-        else if (fullscreen && !mccMotionBlock(pixel)) decoded.r = min(decoded.r, 254.0 / 255.0);
+        bool temporal = fullscreen && mccSymbol(ivec2(127, 15)) == 11;
+        bool firstTile = temporal && mccSymbol(ivec2(15, 31)) == 0
+            && mccSymbol(ivec2(31, 31)) == 0;
+        bool metadataPixel = firstTile && pixel.y < 16
+            && ((pixel.x < 16) || (pixel.x >= 48 && pixel.x < 64)
+                || (pixel.x >= 96 && pixel.x < 112));
+        vec3 decoded;
+        if (metadataPixel) {
+            decoded = pixel.x < 16 ? mccFrameSequence(0)
+                : pixel.x < 64 ? mccFrameSequence(3)
+                : vec3(1.0, 0.0, mccSymbol(ivec2(127, 31)) == 100 ? 1.0 / 255.0 : 2.0 / 255.0);
+        } else {
+            decoded = mccFilmPixel(pixel);
+        }
+        bool spatial = !metadataPixel && !mccMotionBlock(pixel);
+        if (temporal && spatial) {
+            decoded.r = round(decoded.r * 127.0) / 255.0;
+        } else if (fullscreen && spatial) {
+            decoded.r = min(decoded.r, 254.0 / 255.0);
+        }
         vec4 filmColor = vec4(decoded, 1.0);
         #ifdef OIT_ALPHA_ONLY
         executeAlphaOnlyPhase(gl_FragCoord.z, filmColor.a);
