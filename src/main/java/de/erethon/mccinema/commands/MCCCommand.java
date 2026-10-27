@@ -41,6 +41,7 @@ public final class MCCCommand {
     private final ScreenCreateCommand create = new ScreenCreateCommand();
     private final SeekCommand seek = new SeekCommand();
     private final StopCommand stop = new StopCommand();
+    private final SubtitleCommand subtitle = new SubtitleCommand();
 
     @Executes
     @Permission("mccinema.help")
@@ -190,6 +191,46 @@ public final class MCCCommand {
     void cropCancel(@Executor Player player, @Literal({"crop", "zoom", "viewport"}) String subcommand,
                     @Literal("cancel") String action) {
         crop.cancel(player);
+    }
+
+    @Executes
+    @Permission("mccinema.subtitle")
+    void subtitle(@Executor Player player, @Literal("subtitle") String subcommand,
+                  @CustomArg(ScreenArgument.class) Screen screen) {
+        subtitle.show(player, screen);
+    }
+
+    @Executes
+    @Permission("mccinema.subtitle")
+    void subtitleToggle(@Executor Player player, @Literal("subtitle") String subcommand,
+                        @CustomArg(ScreenArgument.class) Screen screen,
+                        @Literal({"on", "off"}) String action) {
+        subtitle.personal(player, screen, action, null);
+    }
+
+    @Executes
+    @Permission("mccinema.subtitle")
+    void subtitleSelect(@Executor Player player, @Literal("subtitle") String subcommand,
+                        @CustomArg(ScreenArgument.class) Screen screen,
+                        @Literal("select") String action, @StringArg(GREEDY) String track) {
+        subtitle.personal(player, screen, action, track);
+    }
+
+    @Executes
+    @Permission("mccinema.subtitle.admin")
+    void subtitleGlobalToggle(CommandSender sender, @Literal("subtitle") String subcommand,
+                              @CustomArg(ScreenArgument.class) Screen screen,
+                              @Literal("global") String scope, @Literal({"on", "off"}) String action) {
+        subtitle.global(sender, screen, action, null);
+    }
+
+    @Executes
+    @Permission("mccinema.subtitle.admin")
+    void subtitleGlobalSelect(CommandSender sender, @Literal("subtitle") String subcommand,
+                              @CustomArg(ScreenArgument.class) Screen screen,
+                              @Literal("global") String scope, @Literal("select") String action,
+                              @StringArg(GREEDY) String track) {
+        subtitle.global(sender, screen, action, track);
     }
 
     @Executes

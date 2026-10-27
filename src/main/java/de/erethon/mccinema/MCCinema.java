@@ -8,13 +8,11 @@ import de.erethon.mccinema.resourcepack.ResourcePackManager;
 import de.erethon.mccinema.resourcepack.ResourcePackManager.HostedResourcePack;
 import de.erethon.mccinema.screen.Screen;
 import de.erethon.mccinema.screen.ScreenManager;
-import de.erethon.mccinema.video.PacketDispatcher;
-import de.erethon.mccinema.video.VideoPlayer;
-import de.erethon.mccinema.video.VideoTransformEditor;
-import de.erethon.mccinema.video.VideoTransformManager;
+import de.erethon.mccinema.video.*;
 import de.erethon.bedrock.compatibility.Internals;
 import de.erethon.bedrock.plugin.EPlugin;
 import de.erethon.bedrock.plugin.EPluginSettings;
+import de.erethon.mccinema.video.film.FilmResourcePack;
 import io.papermc.paper.plugin.lifecycle.event.types.LifecycleEvents;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -41,8 +39,9 @@ public final class MCCinema extends EPlugin implements Listener {
     private ResourcePackManager resourcePackManager;
     private YoutubeDownloadManager youtubeDownloadManager;
     private ResourcePackListener resourcePackListener;
-    private de.erethon.mccinema.video.film.FilmResourcePack filmResourcePack;
+    private FilmResourcePack filmResourcePack;
     private VideoTransformManager videoTransformManager;
+    private SubtitleSettingsManager subtitleSettingsManager;
     private VideoTransformEditor videoTransformEditor;
     private final Map<UUID, VideoPlayer> videoPlayers = new ConcurrentHashMap<>();
 
@@ -92,6 +91,7 @@ public final class MCCinema extends EPlugin implements Listener {
         screenManager = new ScreenManager(this);
         screenManager.loadScreens();
         videoTransformManager = new VideoTransformManager(this);
+        subtitleSettingsManager = new SubtitleSettingsManager(this);
 
         youtubeDownloadManager = new YoutubeDownloadManager(this);
 
@@ -175,9 +175,7 @@ public final class MCCinema extends EPlugin implements Listener {
     }
 
     private void recoverFullscreenCamera(Player player) {
-        // Player data can be reapplied during login. Retry after join regardless
-        // of what the PDC contains at the event callback itself.
-        de.erethon.mccinema.video.film.FilmSpectatorCamera.restoreMarkedViewer(this, player);
+        // Restore after the join callback, when the persisted player state is in place.
         getServer().getScheduler().runTaskLater(this, () -> {
             if (player.isOnline()) {
                 de.erethon.mccinema.video.film.FilmSpectatorCamera.restoreMarkedViewer(this, player);
@@ -257,6 +255,10 @@ public final class MCCinema extends EPlugin implements Listener {
         return videoTransformManager;
     }
 
+    public SubtitleSettingsManager getSubtitleSettingsManager() {
+        return subtitleSettingsManager;
+    }
+
     public VideoTransformEditor getVideoTransformEditor() {
         return videoTransformEditor;
     }
@@ -283,7 +285,7 @@ public final class MCCinema extends EPlugin implements Listener {
         return resourcePackListener;
     }
 
-    public de.erethon.mccinema.video.film.FilmResourcePack getFilmResourcePack() {
+    public FilmResourcePack getFilmResourcePack() {
         return filmResourcePack;
     }
 }
