@@ -22,9 +22,34 @@ import static de.erethon.mccinema.dither.DitherLookupUtil.FULL_COLOR_MAP;
 
 public class FrameProcessor {
     private boolean experimentalFilm;
+    private boolean fullscreenMaps;
+
+    public void setFullscreenMaps(boolean enabled) {
+        fullscreenMaps = enabled;
+    }
 
     public void setExperimentalFilm(boolean enabled) {
         experimentalFilm = enabled;
+    }
+
+    public void setFullscreenFilm(boolean enabled) {
+        filmFrameProcessor.setFullscreen(enabled);
+    }
+
+    public void recordFilmBandwidth(long bytesPerViewer) {
+        filmFrameProcessor.recordBandwidth(bytesPerViewer);
+    }
+
+    public int getFilmTemporalTolerance() {
+        return filmFrameProcessor.getTemporalTolerance();
+    }
+
+    public void requestFilmAnchor() {
+        filmFrameProcessor.requestAnchor();
+    }
+
+    public double getFilmMeasuredBytesPerSecond() {
+        return filmFrameProcessor.getMeasuredBytesPerSecond();
     }
 
     public boolean isExperimentalFilm() {
@@ -115,7 +140,9 @@ public class FrameProcessor {
             t.setDaemon(true);
             return t;
         });
-        this.filmFrameProcessor = new de.erethon.mccinema.video.film.FilmFrameProcessor(executor);
+        this.filmFrameProcessor = new de.erethon.mccinema.video.film.FilmFrameProcessor(executor,
+            plugin.getConfig().getLong("performance.bandwidth.film-temporal-target-bytes-per-second",
+                9L * 1024L * 1024L));
     }
 
     private void loadDitheringConfig(FileConfiguration config) {
@@ -369,6 +396,10 @@ public class FrameProcessor {
 
         byte[] result = mapData.clone();
         ByteArrayPool.releaseTileBuffer();
+
+        if (fullscreenMaps) {
+            FullscreenMapMarker.mark(result, tile, screen.getMapWidth(), screen.getMapHeight());
+        }
 
         return result;
     }

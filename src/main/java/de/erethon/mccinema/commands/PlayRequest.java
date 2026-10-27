@@ -11,6 +11,7 @@ public record PlayRequest(
     int chunkDurationMs,
     FrameProcessor.DitheringMode ditheringMode,
     boolean experimental,
+    boolean fullscreen,
     boolean acceptTools,
     List<String> targetPlayerNames
 ) {

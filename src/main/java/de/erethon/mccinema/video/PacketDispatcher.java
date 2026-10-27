@@ -26,10 +26,20 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public class PacketDispatcher {
     private boolean experimentalFilm;
+    private boolean fullscreenFilm;
+    private boolean fullscreenMaps;
     private final java.util.Map<java.util.UUID, Long> filmViewerGenerations = new java.util.concurrent.ConcurrentHashMap<>();
 
     public void setExperimentalFilm(boolean enabled) {
         experimentalFilm = enabled;
+    }
+
+    public void setFullscreenFilm(boolean enabled) {
+        fullscreenFilm = enabled;
+    }
+
+    public void setFullscreenMaps(boolean enabled) {
+        fullscreenMaps = enabled;
     }
 
     public enum PatchStrategy {
@@ -210,7 +220,7 @@ public class PacketDispatcher {
         }
 
         boolean isSceneChange = totalTiles > 0 && (float) majorChangeCount / totalTiles >= SCENE_CHANGE_THRESHOLD;
-        if (isSceneChange && sceneChangeFramesRemaining == 0 && !useBundlePackets) {
+        if (isSceneChange && sceneChangeFramesRemaining == 0 && !useBundlePackets && !fullscreenFilm) {
             sceneChangeFramesRemaining = SCENE_CHANGE_SPREAD_FRAMES;
         }
 
@@ -235,7 +245,8 @@ public class PacketDispatcher {
         deferredUpdates.clear();
         long dirtyTileCount = allUpdates.stream().filter(update -> update.dirtyRegion() != null).count();
         int maxRegionsPerTile = Math.max(1,
-            maxMapPacketsPerFrame / Math.max(1, (int) Math.min(Integer.MAX_VALUE, dirtyTileCount)));
+            (fullscreenFilm ? MAX_PACKETS_PER_BUNDLE : maxMapPacketsPerFrame)
+                / Math.max(1, (int) Math.min(Integer.MAX_VALUE, dirtyTileCount)));
 
         boolean highMotionFrame = contentStats != null && contentStats.motionScore() >= adaptiveMotionThreshold;
         boolean flatFrame = contentStats != null && contentStats.motionScore() < adaptiveMotionThreshold &&
@@ -317,13 +328,14 @@ public class PacketDispatcher {
         int effectiveMaxBytes = isSceneChange || sceneChangeFramesRemaining > 0
             ? (int) (maxBytesPerFrame * 1.25)
             : maxBytesPerFrame;
-        if (bandwidthTargetEnabled) {
+        if (fullscreenFilm) effectiveMaxBytes = Integer.MAX_VALUE;
+        if (bandwidthTargetEnabled && !fullscreenFilm) {
             int targetPerFrame = Math.max(MIN_DIRTY_REGION_PIXELS,
                 (int) (bandwidthTargetBytesPerSecond / Math.max(1.0, currentFrameRate)));
             effectiveMaxBytes = Math.min(effectiveMaxBytes, targetPerFrame);
         }
         lastFrameByteCap.set(effectiveMaxBytes);
-        int effectiveMaxPackets = Math.min(maxMapPacketsPerFrame, useBundlePackets
+        int effectiveMaxPackets = fullscreenFilm ? MAX_PACKETS_PER_BUNDLE : Math.min(maxMapPacketsPerFrame, useBundlePackets
             ? MAX_PACKETS_PER_BUNDLE
             : (isSceneChange || sceneChangeFramesRemaining > 0
                 ? (int) (adaptiveMaxPacketsPerFrame * 1.3)
@@ -472,7 +484,7 @@ public class PacketDispatcher {
         Set<UUID> baselineViewers = new HashSet<>();
         long baselineBytes = 0;
         int baselinePacketCount = 0;
-        if (experimentalFilm) {
+        if (experimentalFilm || fullscreenMaps) {
             List<ClientboundMapItemDataPacket> baseline = null;
             for (Player viewer : recipients) {
                 long generation = plugin.getFilmResourcePack().loadedGeneration(viewer);
@@ -535,6 +547,12 @@ public class PacketDispatcher {
         // Film bytes describe matching 4x4 image blocks. Preserve that locality
         // with exact block patches rather than collapsing all changes into one box.
         if (experimentalFilm) {
+            if (fullscreenFilm && de.erethon.mccinema.video.film.FilmCodec.isFullscreenAnchor(mapData)) {
+                // Send an anchor in one patch per map. Planning many tiny patches
+                // makes the keyframe a packet/CPU spike and can defer other tiles.
+                return new PreparedUpdate(update, List.of(dirtyRegion),
+                    dirtyRegion.getDataSize(), dirtyRegion.getDataSize());
+            }
             List<MapTile.DirtyRegion> regions = de.erethon.mccinema.video.film.FilmPatchPlanner.plan(
                 mapData, update.tile().getLastSentData(), dirtyRegion,
                 bundleRegionLimit, Math.max(MAP_PACKET_OVERHEAD_BYTES, patchPacketOverheadBytes));
@@ -867,8 +885,11 @@ public class PacketDispatcher {
 
         for (MapTile tile : screen.getTiles()) {
             byte[] data = tile.getLastFrameData();
-            if (de.erethon.mccinema.video.film.FilmCodec.isEncoded(data)) {
-                if (!plugin.getFilmResourcePack().isLoaded(player)) continue;
+            if (de.erethon.mccinema.video.film.FilmCodec.isEncoded(data)
+                || de.erethon.mccinema.video.film.FilmCodec.isFullscreenEncoded(data)) {
+                VideoPlayer video = plugin.getVideoPlayer(screen);
+                if (!plugin.getFilmResourcePack().isLoaded(player)
+                    || video != null && !video.canSendTo(player)) continue;
                 data = tile.getLastSentData();
             }
             if (data != null && data.length > 0) {

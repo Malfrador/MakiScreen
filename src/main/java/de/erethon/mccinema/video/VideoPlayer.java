@@ -29,6 +29,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
@@ -45,12 +46,27 @@ public class VideoPlayer {
     private final FrameProcessor frameProcessor;
     private final PacketDispatcher packetDispatcher;
     private de.erethon.mccinema.video.film.FilmPlaybackGate filmGate;
+    private boolean fullscreenPlayback;
 
-    public void enableExperimentalFilm(org.bukkit.command.CommandSender sender) {
+    public void enableExperimentalFilm(org.bukkit.command.CommandSender sender, boolean fullscreen) {
         plugin.getScreenManager().attachScreenRenderers(screen);
         frameProcessor.setExperimentalFilm(true);
+        frameProcessor.setFullscreenFilm(fullscreen);
         packetDispatcher.setExperimentalFilm(true);
-        filmGate = new de.erethon.mccinema.video.film.FilmPlaybackGate(plugin, this, sender);
+        packetDispatcher.setFullscreenFilm(fullscreen);
+        if (fullscreen) packetDispatcher.setFrameRate(Math.min(frameRate, LIVE_TARGET_FRAME_RATE));
+        fullscreenPlayback = fullscreen;
+        filmGate = new de.erethon.mccinema.video.film.FilmPlaybackGate(plugin, this, sender, fullscreen);
+        if (audioManager != null) audioManager.setPlaybackFilter(this::canSendTo);
+    }
+
+    public void enableFullscreenMaps(org.bukkit.command.CommandSender sender) {
+        plugin.getScreenManager().attachScreenRenderers(screen);
+        frameProcessor.setFullscreenMaps(true);
+        packetDispatcher.setFullscreenMaps(true);
+        packetDispatcher.setFrameRate(Math.min(frameRate, LIVE_TARGET_FRAME_RATE));
+        fullscreenPlayback = true;
+        filmGate = new de.erethon.mccinema.video.film.FilmPlaybackGate(plugin, this, sender, true);
         if (audioManager != null) audioManager.setPlaybackFilter(this::canSendTo);
     }
 
@@ -79,6 +95,7 @@ public class VideoPlayer {
 
     private double frameRate = 30.0;
     private double sourceFrameRate = 30.0;
+    private long lastFullscreenOutputSlot = Long.MIN_VALUE;
     private long videoDurationMs;
     private volatile boolean liveDecoderRunning;
     private volatile boolean liveBufferReady;
@@ -109,9 +126,12 @@ public class VideoPlayer {
     private volatile long lastAvSyncLogNanos;
 
     private final AtomicLong playbackEpoch = new AtomicLong(0);
+    private final AtomicLong seekEpoch = new AtomicLong(0);
 
     private final AtomicLong framesProcessed = new AtomicLong(0);
     private final AtomicLong framesSkipped = new AtomicLong(0);
+    private final AtomicLong driftFramesDropped = new AtomicLong(0);
+    private int consecutiveLateFrames;
     private long lastFrameTime;
     private volatile long lastDriftNanos = 0;
 
@@ -170,7 +190,8 @@ public class VideoPlayer {
 
     public boolean canSendTo(Player player) {
         return (!hasTargetPlayerLimit() || targetPlayerIds.contains(player.getUniqueId()))
-            && (filmGate == null || plugin.getFilmResourcePack().isLoaded(player));
+            && (filmGate == null || plugin.getFilmResourcePack().isLoaded(player, fullscreenPlayback, screen,
+                frameProcessor.isExperimentalFilm()));
     }
 
     public Collection<Player> getPlaybackViewers() {
@@ -443,18 +464,14 @@ public class VideoPlayer {
 
         screen.startViewerCacheUpdater(plugin, 10L);
 
-        if (scheduler == null || scheduler.isShutdown()) {
-            scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-                Thread t = new Thread(r, "MCCinema-VideoPlayer");
-                t.setDaemon(true);
-                t.setPriority(Thread.MAX_PRIORITY);
-                return t;
-            });
-        }
+        ensureScheduler();
         playbackStartTime = System.nanoTime();
+        lastFullscreenOutputSlot = Long.MIN_VALUE;
         lastFrameTime = playbackStartTime;
         framesProcessed.set(0);
         framesSkipped.set(0);
+        driftFramesDropped.set(0);
+        consecutiveLateFrames = 0;
         if (audioManager != null) {
             audioManager.play(screen.getCenterLocation());
         }
@@ -463,6 +480,17 @@ public class VideoPlayer {
         }
         scheduleNextFrame(-1);
         plugin.getLogger().info("Started playback of " + sourceName);
+    }
+
+    private void ensureScheduler() {
+        if (scheduler == null || scheduler.isShutdown()) {
+            scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "MCCinema-VideoPlayer");
+                t.setDaemon(true);
+                t.setPriority(Thread.MAX_PRIORITY);
+                return t;
+            });
+        }
     }
 
     public synchronized void pause() {
@@ -495,6 +523,7 @@ public class VideoPlayer {
         state.set(State.PLAYING);
         notifyStateChange();
         playbackStartTime = System.nanoTime() - (long)(pausedAtFrame / frameRate * 1_000_000_000L);
+        consecutiveLateFrames = 0;
         if (audioManager != null) {
             audioManager.resume(screen.getCenterLocation());
         }
@@ -515,6 +544,7 @@ public class VideoPlayer {
 
     public synchronized void stop() {
         if (disposed) return;
+        seekEpoch.incrementAndGet();
         if (filmGate != null) filmGate.cancel();
         State previousState = state.get();
         state.set(State.STOPPED);
@@ -567,43 +597,73 @@ public class VideoPlayer {
 
     public void seek(long frameNumber) {
         long timeMs = Math.round(frameNumber / frameRate * 1000.0);
-        seek(frameNumber, timeMs);
+        seek(frameNumber, timeMs, null);
     }
 
-    private synchronized void seek(long frameNumber, long audioTimeMs) {
-        if (grabber == null) return;
-        if (liveStream) {
-            plugin.getLogger().warning("Cannot seek a livestream");
+    private void seek(long frameNumber, long audioTimeMs, Consumer<Boolean> completion) {
+        if (grabber == null || disposed || liveStream) {
+            plugin.getLogger().warning("Cannot seek: no local video is available");
+            if (completion != null) completion.accept(false);
             return;
         }
         State currentState = state.get();
         if (audioManager != null) {
             audioManager.stop();
         }
+        if (playbackTask != null) playbackTask.cancel(false);
+        playbackEpoch.incrementAndGet();
+        long request = seekEpoch.incrementAndGet();
+        long targetFrame = Math.max(0, Math.min(frameNumber, totalFrames.get() - 1));
+        ensureScheduler();
         try {
-            frameNumber = Math.max(0, Math.min(frameNumber, totalFrames.get() - 1));
-            grabber.setFrameNumber((int) frameNumber);
-            currentFrame.set(frameNumber);
-            if (audioManager != null) {
-                audioManager.completeSeek(audioTimeMs, screen.getCenterLocation(), currentState == State.PLAYING);
-            }
-            if (currentState == State.PAUSED || currentState == State.PLAYING) {
-                playbackStartTime = System.nanoTime() - (long)(frameNumber / frameRate * 1_000_000_000L);
-            }
-            if (currentState == State.PAUSED) {
-                pausedAtFrame = frameNumber;
-                pausedSeekFrameRendered = renderPausedSeekFrame(frameNumber);
-                currentFrame.set(pausedSeekFrameRendered ? frameNumber + 1 : frameNumber);
-            } else if (currentState == State.PLAYING) {
-                pausedSeekFrameRendered = false;
-                if (playbackTask != null) {
-                    playbackTask.cancel(false);
+            scheduler.execute(() -> {
+                boolean positioned = false;
+                try {
+                    synchronized (this) {
+                        if (request != seekEpoch.get() || disposed || grabber == null) return;
+                        grabber.setFrameNumber((int) targetFrame);
+                        currentFrame.set(targetFrame);
+                        lastFullscreenOutputSlot = Long.MIN_VALUE;
+                        consecutiveLateFrames = 0;
+                        if (fullscreenPlayback && frameProcessor.isExperimentalFilm()) frameProcessor.requestFilmAnchor();
+                        if (state.get() == State.PAUSED) {
+                            pausedAtFrame = targetFrame;
+                            pausedSeekFrameRendered = renderPausedSeekFrame(targetFrame);
+                            currentFrame.set(pausedSeekFrameRendered ? targetFrame + 1 : targetFrame);
+                        }
+                        positioned = true;
+                    }
+                } catch (Exception e) {
+                    plugin.getLogger().log(Level.WARNING, "Failed to seek", e);
                 }
-                playbackEpoch.incrementAndGet();
-                scheduleNextFrame(frameNumber - 1);
-            }
-        } catch (Exception e) {
-            plugin.getLogger().warning("Failed to seek: " + e.getMessage());
+                boolean success = positioned;
+                if (!plugin.isEnabled()) return;
+                Bukkit.getScheduler().runTask(plugin, () -> {
+                    if (request != seekEpoch.get() || disposed) return;
+                    if (success) {
+                        boolean resumePlayback = currentState == State.PLAYING && state.get() == State.PLAYING;
+                        if (audioManager != null) {
+                            audioManager.completeSeek(audioTimeMs, screen.getCenterLocation(), resumePlayback);
+                        }
+                        if (resumePlayback) {
+                            playbackStartTime = System.nanoTime()
+                                - (long)(targetFrame / frameRate * 1_000_000_000L);
+                            pausedSeekFrameRendered = false;
+                            scheduleNextFrame(targetFrame - 1);
+                        } else if (state.get() == State.PAUSED) {
+                            pausedAtFrame = targetFrame;
+                        }
+                    } else if (state.get() == State.PLAYING) {
+                        state.set(State.PAUSED);
+                        pausedAtFrame = currentFrame.get();
+                        notifyStateChange();
+                    }
+                    if (completion != null) completion.accept(success);
+                });
+            });
+        } catch (RejectedExecutionException e) {
+            plugin.getLogger().log(Level.WARNING, "Could not schedule seek", e);
+            if (completion != null) completion.accept(false);
         }
     }
 
@@ -639,6 +699,9 @@ public class VideoPlayer {
 
             long dispatchStart = System.nanoTime();
             packetDispatcher.dispatchImmediateFrame(screen, processedFrame.fullMapData(), getPacketRecipients());
+            if (fullscreenPlayback) {
+                lastFullscreenOutputSlot = Math.round(frameNumber * LIVE_TARGET_FRAME_RATE / frameRate);
+            }
             performanceMetrics.recordPacketDispatch(System.nanoTime() - dispatchStart);
 
             framesProcessed.incrementAndGet();
@@ -654,8 +717,12 @@ public class VideoPlayer {
     }
 
     public void seekToTime(long milliseconds) {
+        seekToTime(milliseconds, null);
+    }
+
+    public void seekToTime(long milliseconds, Consumer<Boolean> completion) {
         long targetFrame = Math.round(milliseconds / 1000.0 * frameRate);
-        seek(targetFrame, milliseconds);
+        seek(targetFrame, milliseconds, completion);
     }
 
 
@@ -697,6 +764,9 @@ public class VideoPlayer {
             long videoPositionNanos = (long)(currentFrame.get() / frameRate * 1_000_000_000.0);
             long driftNanos = elapsedNanos - videoPositionNanos;
             lastDriftNanos = driftNanos;
+            boolean experimentalFullscreen = fullscreenPlayback && frameProcessor.isExperimentalFilm();
+            consecutiveLateFrames = experimentalFullscreen && driftNanos > avSyncThresholdNanos
+                ? consecutiveLateFrames + 1 : 0;
 
             if (!liveStream && driftNanos > avSyncThresholdNanos) {
                 long targetFrame = (long)(elapsedNanos / 1_000_000_000.0 * frameRate);
@@ -706,19 +776,26 @@ public class VideoPlayer {
                 }
                 long currentFrameNum = currentFrame.get();
                 long framesToSkip = targetFrame - currentFrameNum;
-                if (framesToSkip > 0) {
+                // A full anchor can cause a single expensive cycle. Allow two
+                // cycles to recover before dropping displayed fullscreen frames.
+                if (framesToSkip > 0 && (!experimentalFullscreen || consecutiveLateFrames >= 3
+                    || framesToSkip >= hardSeekThresholdFrames)) {
                     if (framesToSkip >= hardSeekThresholdFrames) {
                         grabber.setFrameNumber((int) targetFrame);
                         currentFrame.set(targetFrame);
+                        if (fullscreenPlayback && frameProcessor.isExperimentalFilm()) frameProcessor.requestFilmAnchor();
                         framesSkipped.addAndGet(framesToSkip);
+                        driftFramesDropped.addAndGet(framesToSkip);
                         logAvSync("A/V sync hard-seek: skipped " + framesToSkip + " frames " +
                             "(drift: " + (driftNanos / 1_000_000) + "ms, jumped to frame " + targetFrame + ")");
                     } else {
-                        int framesToDrop = (int) Math.min(framesToSkip, maxDropFramesPerCycle);
+                        int framesToDrop = (int) Math.min(framesToSkip,
+                            experimentalFullscreen ? 1 : maxDropFramesPerCycle);
                         int dropped = dropFramesSequential(framesToDrop);
                         if (dropped > 0) {
                             currentFrame.addAndGet(dropped);
                             framesSkipped.addAndGet(dropped);
+                            driftFramesDropped.addAndGet(dropped);
                             logAvSync("A/V sync drop: dropped " + dropped + " frame(s) " +
                                 "(drift: " + (driftNanos / 1_000_000) + "ms, target frame " + targetFrame + ")");
                         }
@@ -735,6 +812,7 @@ public class VideoPlayer {
 
             long decodeStart = System.nanoTime();
             long frameNum = currentFrame.get();
+            long fullscreenSlot = Long.MIN_VALUE;
             BufferedImage image;
             if (liveStream) {
                 image = pollLiveFrame();
@@ -755,6 +833,15 @@ public class VideoPlayer {
                 performanceMetrics.recordFrameDecode(decodeEnd - decodeStart);
                 frameNum = currentFrame.getAndIncrement();
 
+                // Map textures are presented on the client tick. Decode source
+                // frames for timing, but send at most one picture per 20 Hz slot.
+                fullscreenSlot = fullscreenPlayback && frameRate > LIVE_TARGET_FRAME_RATE
+                    ? Math.round(frameNum * LIVE_TARGET_FRAME_RATE / frameRate) : Long.MIN_VALUE;
+                if (fullscreenSlot != Long.MIN_VALUE && fullscreenSlot == lastFullscreenOutputSlot) {
+                    framesSkipped.incrementAndGet();
+                    return frameNum;
+                }
+
                 long conversionStart = System.nanoTime();
                 image = converter.convert(frame);
                 long conversionEnd = System.nanoTime();
@@ -763,13 +850,25 @@ public class VideoPlayer {
                     return frameNum;
                 }
                 performanceMetrics.recordImageConversion(conversionEnd - conversionStart);
+                if (fullscreenSlot != Long.MIN_VALUE) lastFullscreenOutputSlot = fullscreenSlot;
             }
             FrameProcessor.ProcessedFrame processedFrame = frameProcessor.processFrame(
                 image, screen.getPixelWidth(), screen.getPixelHeight(), performanceMetrics, videoTransform
             );
 
+            if (fullscreenSlot != Long.MIN_VALUE) {
+                long presentationTime = playbackStartTime
+                    + fullscreenSlot * (long) (1_000_000_000L / LIVE_TARGET_FRAME_RATE);
+                long waitNanos = presentationTime - System.nanoTime();
+                if (waitNanos > 0) java.util.concurrent.locks.LockSupport.parkNanos(waitNanos);
+            }
+
             long dispatchStart = System.nanoTime();
-            packetDispatcher.dispatchFrame(screen, processedFrame.updates(), processedFrame.contentStats(), performanceMetrics, getPacketRecipients());
+            var recipients = getPacketRecipients();
+            packetDispatcher.dispatchFrame(screen, processedFrame.updates(), processedFrame.contentStats(), performanceMetrics, recipients);
+            if (fullscreenPlayback && frameProcessor.isExperimentalFilm() && !recipients.isEmpty()) {
+                frameProcessor.recordFilmBandwidth(packetDispatcher.getLastFrameBytesSent());
+            }
             long dispatchEnd = System.nanoTime();
             performanceMetrics.recordPacketDispatch(dispatchEnd - dispatchStart);
             framesProcessed.incrementAndGet();
@@ -1250,7 +1349,11 @@ public class VideoPlayer {
         if (debugEnabledPlayers.isEmpty()) {
             return;
         }
-        long bytesPerSecond = (long) (debugCurrentFps * packetDispatcher.getLastFrameBytesSent());
+        double measuredFilmBytes = fullscreenPlayback && frameProcessor.isExperimentalFilm()
+            ? frameProcessor.getFilmMeasuredBytesPerSecond() : 0;
+        long bytesPerSecond = measuredFilmBytes > 0
+            ? (long) measuredFilmBytes
+            : (long) (debugCurrentFps * packetDispatcher.getLastFrameBytesSent());
         long decode = performanceMetrics.getLastFrameDecodeUs();
         long dither = performanceMetrics.getLastDitheringUs();
         long upscale = performanceMetrics.getLastUpscalingUs();
@@ -1263,8 +1366,6 @@ public class VideoPlayer {
         long boundingBytes = packetDispatcher.getLastFrameBoundingBytes();
         long fullMapBytes = packetDispatcher.getLastFrameFullMapBytes();
         long frameCapBytes = packetDispatcher.getLastFrameByteCap();
-        FrameProcessor.FrameContentStats contentStats = frameProcessor.getLastFrameContentStats();
-        FrameProcessor.AdaptiveDitherProfile adaptiveProfile = frameProcessor.getLastAdaptiveProfile();
         double boxSavePercent = boundingBytes > 0 ? (1.0 - ((double) frameBytes / boundingBytes)) * 100.0 : 0.0;
         double fullSavePercent = fullMapBytes > 0 ? (1.0 - ((double) frameBytes / fullMapBytes)) * 100.0 : 0.0;
         long avgBytesPerTile = sentTiles > 0 ? frameBytes / sentTiles : 0;
@@ -1276,8 +1377,8 @@ public class VideoPlayer {
             "%.1f</gold> <gold>U:%.1f</gold> <aqua>Ti:%.1f</aqua> <blue>P:%.1f</blue>" +
             "<dark_gray>]</dark_gray> " +
             "<dark_gray>|</dark_gray> BW~: <white>%s/s</white> <gray>(%s/f cap:%s)</gray> " +
-            "<dark_gray>|</dark_gray> <light_purple>Tiles:<white>%d</white> MR:<white>%d</white> Avg:<white>%s</white> Save:<white>%.0f%%</white>/<green>%.0f%%</green> M:<white>%.2f</white> A:<white>%s</white></light_purple>" +
-            " <dark_gray>|</dark_gray> %s",
+            "<dark_gray>|</dark_gray> <light_purple>Tiles:<white>%d</white> MR:<white>%d</white> Avg:<white>%s</white> Save:<white>%.0f%%</white>/<green>%.0f%%</green></light_purple>" +
+            " <dark_gray>|</dark_gray> %s <red>Drop:<white>%d</white></red>",
             debugCurrentFps,
             total / 1000.0,
             decode / 1000.0,
@@ -1293,9 +1394,8 @@ public class VideoPlayer {
             formatBytes(avgBytesPerTile),
             boxSavePercent,
             fullSavePercent,
-            contentStats.motionScore(),
-            adaptiveProfile.mode(),
-            formatDriftTag(lastDriftNanos)
+            formatDriftTag(lastDriftNanos),
+            driftFramesDropped.get()
         );
         Component component = MiniMessage.miniMessage().deserialize(message);
         for (UUID playerId : debugEnabledPlayers) {

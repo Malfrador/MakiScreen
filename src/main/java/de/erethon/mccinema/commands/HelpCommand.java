@@ -20,7 +20,9 @@ public class HelpCommand {
             
             <yellow>Playback Control:</yellow>
               <white>/mcc play <screen> <file-or-url> [--audio]</white> <gray>- Play a video or livestream
-              <white>/mcc play <screen> <file> --experimental [--audio]</white> <gray>- Experimental film colour (26.2 decoder pack)
+              <white>/mcc play <screen> <file> --experimental [--audio]</white> <gray>- Experimental film colour (26.2/26.3 decoder pack)
+              <white>/mcc play <screen> <file> --fullscreen [--dither MODE]</white> <gray>- 26.3 fullscreen map playback
+              <white>/mcc play <screen> <file> --experimental --fullscreen</white> <gray>- 26.3 temporal film in fullscreen
               <white>/mcc play bigscreen https://www.youtube.com/watch?v=...</white> <gray>- Play YouTube live
               <white>/mcc play bigscreen https://www.twitch.tv/channel</white> <gray>- Play Twitch live
               <white>/mcc pause <screen></white> <gray>- Pause playback

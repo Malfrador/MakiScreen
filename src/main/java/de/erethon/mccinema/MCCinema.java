@@ -128,6 +128,9 @@ public final class MCCinema extends EPlugin implements Listener {
         getServer().getPluginManager().registerEvents(resourcePackListener, this);
         filmResourcePack = new de.erethon.mccinema.video.film.FilmResourcePack(this);
         getServer().getPluginManager().registerEvents(filmResourcePack, this);
+        for (Player player : getServer().getOnlinePlayers()) {
+            recoverFullscreenCamera(player);
+        }
         videoTransformEditor = new VideoTransformEditor(this);
         getServer().getPluginManager().registerEvents(videoTransformEditor, this);
         logger.info("MCCinema enabled!");
@@ -163,11 +166,23 @@ public final class MCCinema extends EPlugin implements Listener {
 
     @EventHandler
     public void onPlayerJoin(PlayerJoinEvent event) {
+        recoverFullscreenCamera(event.getPlayer());
         resendAudioPacksAfterJoin(event.getPlayer());
         // Send last frame to joining players
         resendScreenFramesAfterJoin(event.getPlayer(), 20L);
         resendScreenFramesAfterJoin(event.getPlayer(), 60L);
         resendScreenFramesAfterJoin(event.getPlayer(), 120L);
+    }
+
+    private void recoverFullscreenCamera(Player player) {
+        // Player data can be reapplied during login. Retry after join regardless
+        // of what the PDC contains at the event callback itself.
+        de.erethon.mccinema.video.film.FilmSpectatorCamera.restoreMarkedViewer(this, player);
+        getServer().getScheduler().runTaskLater(this, () -> {
+            if (player.isOnline()) {
+                de.erethon.mccinema.video.film.FilmSpectatorCamera.restoreMarkedViewer(this, player);
+            }
+        }, 1L);
     }
 
     private void resendAudioPacksAfterJoin(Player player) {

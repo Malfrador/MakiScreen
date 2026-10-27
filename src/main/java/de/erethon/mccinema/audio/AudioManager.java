@@ -18,8 +18,10 @@ import java.util.Collection;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
@@ -47,7 +49,10 @@ public class AudioManager {
 
     private final AtomicInteger currentChunkIndex = new AtomicInteger(-1);
     private final AtomicBoolean isPlaying = new AtomicBoolean(false);
+    private final Map<UUID, RecentChunks> recentChunks = new ConcurrentHashMap<>();
     private BukkitTask chunkScheduler;
+
+    private record RecentChunks(int latest, int previous) {}
 
     private long totalDurationMs;
     private long pausedAtMs;
@@ -179,7 +184,8 @@ public class AudioManager {
                 json.append("      {\n");
                 json.append("        \"name\": \"").append(SOUND_NAMESPACE).append(":")
                     .append(videoId).append("/chunk_").append(chunk.index()).append("\",\n");
-                json.append("        \"preload\": true,\n");
+                // Preloading every chunk of a long video stalls resource reloads.
+                json.append("        \"preload\": ").append(chunk.index() == 0).append(",\n");
                 json.append("        \"stream\": false\n");
                 json.append("      }\n");
                 json.append("    ]\n");
@@ -312,18 +318,25 @@ public class AudioManager {
         AudioChunk chunk = chunks.get(index);
         String key = SOUND_NAMESPACE + ":" + videoId + ".chunk_" + chunk.index();
         for (Player player : getAudioRecipients()) {
-            if (playbackFilter.test(player)) player.playSound(location, key, SoundCategory.RECORDS, 1.0f, 1.0f);
+            if (playbackFilter.test(player)) {
+                player.playSound(location, key, SoundCategory.RECORDS, 1.0f, 1.0f);
+                recentChunks.compute(player.getUniqueId(), (id, previous) ->
+                    new RecentChunks(chunk.index(), previous == null ? -1 : previous.latest()));
+            }
         }
     }
 
     private void stopAllSounds() {
-        for (int i = 0; i < chunks.size(); i++) {
-            String key = SOUND_NAMESPACE + ":" + videoId + ".chunk_" + i;
-
-            for (Player player : getAudioRecipients()) {
-                player.stopSound(key);
+        for (var entry : recentChunks.entrySet()) {
+            Player player = Bukkit.getPlayer(entry.getKey());
+            if (player == null || !player.isOnline()) continue;
+            RecentChunks recent = entry.getValue();
+            player.stopSound(SOUND_NAMESPACE + ":" + videoId + ".chunk_" + recent.latest());
+            if (recent.previous() >= 0 && recent.previous() != recent.latest()) {
+                player.stopSound(SOUND_NAMESPACE + ":" + videoId + ".chunk_" + recent.previous());
             }
         }
+        recentChunks.clear();
     }
 
     private Collection<Player> getAudioRecipients() {

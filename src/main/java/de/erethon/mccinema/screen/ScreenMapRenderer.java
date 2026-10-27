@@ -33,7 +33,9 @@ public class ScreenMapRenderer extends MapRenderer {
     @Override
     public void render(@NotNull MapView mapView, @NotNull MapCanvas canvas, @NotNull Player player) {
         byte[] data = tile.getLastSentData();
-        if (FilmCodec.isEncoded(data) || FilmCodec.isEncoded(tile.getLastFrameData())) {
+        if (FilmCodec.isEncoded(data) || FilmCodec.isFullscreenEncoded(data)
+            || FilmCodec.isEncoded(tile.getLastFrameData())
+            || FilmCodec.isFullscreenEncoded(tile.getLastFrameData())) {
             MCCinema plugin = MCCinema.getInstance();
             var video = plugin.getVideoPlayer(screen);
             boolean canDecode = plugin.getFilmResourcePack().isLoaded(player)

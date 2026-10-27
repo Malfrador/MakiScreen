@@ -10,13 +10,34 @@ int mccPackedRgb(ivec3 rgb) {
     return (rgb.r << 16) | (rgb.g << 8) | rgb.b;
 }
 
+int mccSymbol(ivec2 position);
+
+bool mccFullscreenTexture() {
+    return textureSize(Sampler0, 0) == ivec2(128, 128)
+        && (mccSymbol(ivec2(127, 15)) == 6 || mccSymbol(ivec2(127, 15)) == 7);
+}
+
 bool mccFilmTexture() {
     if (textureSize(Sampler0, 0) != ivec2(128, 128)) return false;
-    for (int i = 0; i < 16; i++) {
+    for (int i = 0; i < 7; i++) {
         ivec2 position = ivec2(i % 8, i / 8) * 16 + ivec2(15);
         if (mccPackedRgb(mccRgb(position)) != MCC_HEADER_RGB[i]) return false;
     }
-    return true;
+    int version = mccSymbol(ivec2(127, 15));
+    if (version == 5) {
+        for (int i = 8; i < 16; i++) {
+            ivec2 position = ivec2(i % 8, i / 8) * 16 + ivec2(15);
+            if (mccPackedRgb(mccRgb(position)) != MCC_HEADER_RGB[i]) return false;
+        }
+        return true;
+    }
+    // Keep this header check identical to mcc_film_vertex.glsl.
+    int frameKind = mccSymbol(ivec2(127, 31));
+    return mccSymbol(ivec2(79, 31)) == 26
+        && mccSymbol(ivec2(95, 31)) == 3
+        && ((version == 6 && mccSymbol(ivec2(111, 31)) == 6
+                && (frameKind == 96 || frameKind == 97))
+            || (version == 7 && mccSymbol(ivec2(111, 31)) == 7 && frameKind == 98));
 }
 
 int mccSymbol(ivec2 position) {
@@ -140,6 +161,8 @@ vec2 mccSmoothChroma(ivec2 pixel, int ownDetail) {
     for (int dy = 0; dy < 2; dy++) {
         for (int dx = 0; dx < 2; dx++) {
             ivec2 block = clamp(first + ivec2(dx, dy), ivec2(0), ivec2(31));
+            int neighborBase = mccRecordBit(block);
+            if (mccRawBits(block / 4, 1736 + (neighborBase / 109) * 3 + 1, 2) == 3) continue;
             float spatial = (dx == 0 ? 1.0 - fraction.x : fraction.x)
                 * (dy == 0 ? 1.0 - fraction.y : fraction.y);
             int detail = all(equal(block, ownBlock)) ? ownDetail : mccGradientRecord(block.y * 32 + block.x);
@@ -149,11 +172,21 @@ vec2 mccSmoothChroma(ivec2 pixel, int ownDetail) {
             total += weight;
         }
     }
-    return sum / max(total, 0.0001);
+    return total < 0.0001 ? mccBlockChroma(ownBlock, pixel, ownDetail) : sum / total;
 }
 
 vec3 mccFilmPixel(ivec2 pixel) {
     ivec2 block = pixel / 4;
+    ivec2 macro = block / 4;
+    int base = mccRecordBit(block);
+    int mode = mccRawBits(macro, 1736 + (base / 109) * 3 + 1, 2);
+    if (mode == 3) {
+        int dx = mccBits(macro, base, 8);
+        int dy = mccBits(macro, base + 8, 8);
+        int sequence = mccBits(macro, base + 16, 8) & 3;
+        return vec3(1.0, float(dx + ((sequence & 1) << 7)) / 255.0,
+            float(dy + ((sequence & 2) << 6)) / 255.0);
+    }
     int detail = mccGradientRecord(block.y * 32 + block.x);
     float y = mccLuma(pixel, detail);
     vec2 chroma = mccSmoothChroma(pixel, detail);
@@ -161,4 +194,10 @@ vec3 mccFilmPixel(ivec2 pixel) {
     float cr = chroma.y;
     return clamp(vec3(y + 1.402 * cr, y - 0.344136 * cb - 0.714136 * cr,
                      y + 1.772 * cb) / 255.0, 0.0, 1.0);
+}
+
+bool mccMotionBlock(ivec2 pixel) {
+    ivec2 block = pixel / 4;
+    int base = mccRecordBit(block);
+    return mccRawBits(block / 4, 1736 + (base / 109) * 3 + 1, 2) == 3;
 }

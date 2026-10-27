@@ -108,6 +108,10 @@ performance:
       enabled: false
       bytes-per-second: 20971520
 
+    # Fullscreen film adjusts its temporal reuse precision toward this per-viewer
+    # rate. This does not skip frames or cap packets; complex scenes may exceed it.
+    film-temporal-target-bytes-per-second: 9437184
+
     # Adaptive bandwidth behavior based on analyzed frame content
     adaptive:
       # Motion score where frame is considered high-motion (0.0 - 1.0)

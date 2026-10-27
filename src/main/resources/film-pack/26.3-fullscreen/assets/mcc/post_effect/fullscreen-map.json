@@ -1,0 +1,19 @@
+{
+  "targets": {
+    "resolved": {"width": @FRAME_WIDTH@, "height": @FRAME_HEIGHT@}
+  },
+  "passes": [
+    {
+      "vertex_shader": "minecraft:core/screenquad",
+      "fragment_shader": "mcc:post/copy_current",
+      "inputs": [{"sampler_name": "In", "target": "minecraft:main"}],
+      "output": "resolved"
+    },
+    {
+      "vertex_shader": "minecraft:core/screenquad",
+      "fragment_shader": "mcc:post/fullscreen_present",
+      "inputs": [{"sampler_name": "In", "target": "resolved"}],
+      "output": "minecraft:main"
+    }
+  ]
+}

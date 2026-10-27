@@ -221,6 +221,12 @@ public class DebugCommand {
         sender.sendMessage(MM.deserialize("<yellow>Temporal Optimizations:"));
         sender.sendMessage(MM.deserialize("<gray>  Temporal Dithering: " + formatBoolean(processor.isUsingTemporalDithering())));
         sender.sendMessage(MM.deserialize("<gray>  Temporal Threshold: <white>" + processor.getTemporalThreshold()));
+        if (processor.getFilmTemporalTolerance() > 0) {
+            sender.sendMessage(MM.deserialize("<gray>  Fullscreen film tolerance: <white>"
+                + processor.getFilmTemporalTolerance() + "/255 per RGB channel"));
+            sender.sendMessage(MM.deserialize("<gray>  Fullscreen film estimated rate: <white>"
+                + String.format("%.1f", processor.getFilmMeasuredBytesPerSecond() / (1024.0 * 1024.0)) + " MiB/s"));
+        }
         sender.sendMessage(MM.deserialize(""));
         sender.sendMessage(MM.deserialize("<aqua>Patch Optimizations:"));
         sender.sendMessage(MM.deserialize("<gray>  Mode: <white>" + dispatcher.getPatchStrategy()));

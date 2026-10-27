@@ -4,7 +4,10 @@ import java.awt.Graphics2D;
 import java.awt.RenderingHints;
 import java.awt.geom.AffineTransform;
 import java.awt.image.BufferedImage;
+import java.awt.image.ComponentSampleModel;
+import java.awt.image.DataBufferByte;
 import java.awt.image.DataBufferInt;
+import java.awt.image.SinglePixelPackedSampleModel;
 import java.util.Arrays;
 
 /** Version 5: spatial 16x16 carrier regions with independent endpoint, chroma,
@@ -20,6 +23,21 @@ public final class FilmCodec {
     public static final int PAYLOAD_END = TILE_SIZE * TILE_SIZE;
     private static final int[] MAGIC = {77, 67, 67, 70, 73, 76, 77, 5, 26, 2, 4, 4, 8, 8, 4, 96};
     private static final byte[] SHADOW_SELECTOR = createShadowSelectors();
+    private static final float[] CHROMA_FRACTION = {0.625f, 0.875f, 0.125f, 0.375f};
+    private static final int[] LOCAL_MOTION_X = {0, 1, -1, 0, 0};
+    private static final int[] LOCAL_MOTION_Y = {0, 0, 0, 1, -1};
+    private static final ThreadLocal<DecodeScratch> DECODE_SCRATCH = ThreadLocal.withInitial(DecodeScratch::new);
+
+    private static final class DecodeScratch {
+        private static final int BLOCKS = 32 * 32;
+        final int[] mode = new int[BLOCKS], low = new int[BLOCKS], high = new int[BLOCKS];
+        final int[] cb = new int[BLOCKS], cr = new int[BLOCKS], detail = new int[BLOCKS];
+        final int[] cbX = new int[BLOCKS], cbY = new int[BLOCKS];
+        final int[] crX = new int[BLOCKS], crY = new int[BLOCKS];
+        final int[] motionX = new int[BLOCKS], motionY = new int[BLOCKS];
+        final int[] corner00 = new int[BLOCKS], corner03 = new int[BLOCKS];
+        final int[] corner30 = new int[BLOCKS], corner33 = new int[BLOCKS];
+    }
 
     private FilmCodec() {}
 
@@ -47,8 +65,10 @@ public final class FilmCodec {
             && (centered || (Math.abs(targetX - integerX) < 0.000001 && Math.abs(targetY - integerY) < 0.000001))
             && integerX >= 0 && integerY >= 0
             && integerX + source.getWidth() <= width && integerY + source.getHeight() <= height) {
-            source.getRGB(0, 0, source.getWidth(), source.getHeight(), pixels,
-                integerY * width + integerX, width);
+            if (!copyUnscaledPixels(source, pixels, width, integerX, integerY)) {
+                source.getRGB(0, 0, source.getWidth(), source.getHeight(), pixels,
+                    integerY * width + integerX, width);
+            }
             return pixels;
         }
         Graphics2D graphics = fitted.createGraphics();
@@ -64,20 +84,74 @@ public final class FilmCodec {
         return pixels;
     }
 
+    private static boolean copyUnscaledPixels(BufferedImage source, int[] target,
+                                              int targetWidth, int offsetX, int offsetY) {
+        int sourceWidth = source.getWidth(), sourceHeight = source.getHeight();
+        var raster = source.getRaster();
+        if (raster.getSampleModelTranslateX() != 0 || raster.getSampleModelTranslateY() != 0) return false;
+        if (source.getType() == BufferedImage.TYPE_INT_RGB
+            && raster.getDataBuffer() instanceof DataBufferInt buffer
+            && raster.getSampleModel() instanceof SinglePixelPackedSampleModel sampleModel
+            && sampleModel.getScanlineStride() == sourceWidth
+            && buffer.getOffset() == 0 && buffer.getData().length == sourceWidth * sourceHeight) {
+            int[] data = buffer.getData();
+            for (int y = 0; y < sourceHeight; y++) {
+                System.arraycopy(data, y * sourceWidth, target,
+                    (offsetY + y) * targetWidth + offsetX, sourceWidth);
+            }
+            return true;
+        }
+        if (source.getType() == BufferedImage.TYPE_3BYTE_BGR
+            && raster.getDataBuffer() instanceof DataBufferByte buffer
+            && raster.getSampleModel() instanceof ComponentSampleModel sampleModel
+            && sampleModel.getPixelStride() == 3
+            && sampleModel.getScanlineStride() == sourceWidth * 3
+            && Arrays.equals(sampleModel.getBandOffsets(), new int[]{2, 1, 0})
+            && buffer.getOffset() == 0 && buffer.getData().length == sourceWidth * sourceHeight * 3) {
+            byte[] data = buffer.getData();
+            for (int y = 0; y < sourceHeight; y++) {
+                int sourceOffset = y * sourceWidth * 3;
+                int targetOffset = (offsetY + y) * targetWidth + offsetX;
+                for (int x = 0; x < sourceWidth; x++) {
+                    int blue = data[sourceOffset++] & 255;
+                    int green = data[sourceOffset++] & 255;
+                    int red = data[sourceOffset++] & 255;
+                    target[targetOffset + x] = red << 16 | green << 8 | blue;
+                }
+            }
+            return true;
+        }
+        return false;
+    }
+
     public static byte[] encodeTile(int[] rgb, int stride, int originX, int originY) {
         return encodeTile(rgb, stride, originX, originY, null);
     }
 
     public static byte[] encodeTile(int[] rgb, int stride, int originX, int originY, byte[] previous) {
+        return encodeTile(rgb, stride, originX, originY, previous, null, 0, 0, 0, 0, null, 0);
+    }
+
+    private static byte[] encodeTile(int[] rgb, int stride, int originX, int originY,
+                                     byte[] previous, int[] anchorPixels, int height,
+                                     int motionX, int motionY, int temporalTolerance,
+                                     int[] motionBlockCounts, int tileIndex) {
         byte[] result = new byte[TILE_SIZE * TILE_SIZE];
         Arrays.fill(result, (byte) 4);
         boolean reusePrevious = isEncoded(previous);
+        boolean reuseFullscreen = anchorPixels != null && isFullscreenEncoded(previous);
         int[] luma = new int[16];
         int[] shadowSelectors = new int[16];
         double[] cbValues = new double[16];
         double[] crValues = new double[16];
         for (int by = 0; by < 32; by++) {
             for (int bx = 0; bx < 32; bx++) {
+                if (anchorPixels != null && writeMotionBlock(result, previous, reuseFullscreen,
+                    rgb, anchorPixels, stride, height, originX, originY, bx, by,
+                    motionX, motionY, temporalTolerance)) {
+                    if (motionBlockCounts != null) motionBlockCounts[tileIndex]++;
+                    continue;
+                }
                 int min = 255, max = 0;
                 double cb = 0, cr = 0;
                 int lumaSum = 0;
@@ -109,9 +183,17 @@ public final class FilmCodec {
                 writeBlock(result, macroX, macroY, recordBit, min, max, cbByte, crByte);
                 encodeDetail(result, macroX, macroY, recordBit, cbValues, crValues,
                     averageCb, averageCr, shadowCurve);
-                selectBlockMode(result, reusePrevious ? previous : null, macroX, macroY, recordBit,
+                // Compact spatial modes leave selector slots unread by the shader.
+                // Retain those carrier bytes across fullscreen interframes too;
+                // a prior motion block has no spatial selectors to preserve.
+                boolean previousSpatial = reusePrevious
+                    || (reuseFullscreen && mode(previous, macroX, macroY, recordBit) != 3);
+                selectBlockMode(result, previousSpatial ? previous : null, macroX, macroY, recordBit,
                     min, max, shadowCurve, luma);
-                if (reusePrevious && !sameBlock(result, previous, macroX, macroY, recordBit)
+                // Reuse only earlier spatial records. Fullscreen motion records
+                // refer to the retained anchor and cannot stand in for a fresh
+                // spatial block. Anchors themselves always encode afresh.
+                if (previousSpatial && !sameBlock(result, previous, macroX, macroY, recordBit)
                     && visuallyEquivalent(result, previous, macroX, macroY, recordBit)) {
                     copyRecord(previous, result, macroX, macroY, recordBit);
                 }
@@ -121,6 +203,273 @@ public final class FilmCodec {
             setSymbol(result, i % 8, i / 8, 255, MAGIC[i]);
         }
         return result;
+    }
+
+    /** Version 6 stores a tile address and may copy 4x4 blocks from the retained anchor. */
+    public static byte[] encodeFullscreenTile(int[] rgb, int[] anchorPixels, int stride, int height,
+                                               int tileX, int tileY, int tilesWide, int tilesHigh,
+                                               byte[] previousTile, int motionX, int motionY,
+                                               boolean anchor, int temporalTolerance) {
+        return encodeFullscreenTile(rgb, anchorPixels, stride, height, tileX, tileY,
+            tilesWide, tilesHigh, previousTile, motionX, motionY, anchor,
+            temporalTolerance, null, 0);
+    }
+
+    public static byte[] encodeFullscreenTile(int[] rgb, int[] anchorPixels, int stride, int height,
+                                               int tileX, int tileY, int tilesWide, int tilesHigh,
+                                               byte[] previousTile, int motionX, int motionY,
+                                               boolean anchor, int temporalTolerance,
+                                               int[] motionBlockCounts, int tileIndex) {
+        int originX = tileX * TILE_SIZE, originY = tileY * TILE_SIZE;
+        byte[] data = encodeTile(rgb, stride, originX, originY, previousTile,
+            anchor ? null : anchorPixels, height, motionX, motionY, temporalTolerance,
+            motionBlockCounts, tileIndex);
+        int[] header = {77, 67, 67, 70, 73, 76, 77, 6,
+            tileX, tileY, tilesWide, tilesHigh, 26, 3, 6, anchor ? 97 : 96};
+        for (int i = 0; i < header.length; i++) setSymbol(data, i % 8, i / 8, 255, header[i]);
+        return data;
+    }
+
+    private static boolean writeMotionBlock(byte[] data, byte[] previous, boolean reusePrevious,
+                                            int[] rgb, int[] anchorPixels, int stride, int height,
+                                            int originX, int originY, int bx, int by,
+                                            int motionX, int motionY, int tolerance) {
+        int x = originX + bx * 4, y = originY + by * 4;
+        boolean stationary = motionMatch(rgb, anchorPixels, stride, height, x, y, 0, 0, tolerance);
+        int dx = stationary ? 0 : motionX, dy = stationary ? 0 : motionY;
+        int mx = bx / 4, my = by / 4;
+        int base = ((by & 3) * 4 + (bx & 3)) * RECORD_BITS;
+        if (!stationary) {
+            int movingTolerance = Math.max(2, tolerance / 2);
+            boolean matched = (dx != 0 || dy != 0)
+                && motionInBounds(stride, height, x, y, dx, dy)
+                && motionMatch(rgb, anchorPixels, stride, height, x, y, dx, dy, movingTolerance);
+            if (!matched && reusePrevious && mode(previous, mx, my, base) == 3) {
+                int priorX = get(previous, mx, my, base, 8) - 64;
+                int priorY = get(previous, mx, my, base + 8, 8) - 64;
+                for (int i = 0; i < LOCAL_MOTION_X.length; i++) {
+                    int candidateX = priorX + LOCAL_MOTION_X[i], candidateY = priorY + LOCAL_MOTION_Y[i];
+                    if (candidateX < -64 || candidateX > 63 || candidateY < -64 || candidateY > 63
+                        || (candidateX == 0 && candidateY == 0)
+                        || (candidateX == motionX && candidateY == motionY)
+                        || !motionInBounds(stride, height, x, y, candidateX, candidateY)) continue;
+                    if (motionMatch(rgb, anchorPixels, stride, height, x, y,
+                        candidateX, candidateY, movingTolerance)) {
+                        dx = candidateX;
+                        dy = candidateY;
+                        matched = true;
+                        break;
+                    }
+                }
+            }
+            // A moving edge may not have had its own motion vector last frame.
+            // Borrow one from an already encoded or prior adjacent block, then
+            // accept it only after checking all 16 current pixels against the anchor.
+            for (int neighbor = 0; !matched && neighbor < 4; neighbor++) {
+                if (neighbor >= 2 && !reusePrevious) break;
+                int nx = bx - ((neighbor & 1) == 0 ? 1 : 0);
+                int ny = by - ((neighbor & 1) == 1 ? 1 : 0);
+                if (nx < 0 || ny < 0) continue;
+                byte[] carrier = neighbor < 2 ? data : previous;
+                int neighborMx = nx / 4, neighborMy = ny / 4;
+                int neighborBase = ((ny & 3) * 4 + (nx & 3)) * RECORD_BITS;
+                if (mode(carrier, neighborMx, neighborMy, neighborBase) != 3) continue;
+                int candidateX = get(carrier, neighborMx, neighborMy, neighborBase, 8) - 64;
+                int candidateY = get(carrier, neighborMx, neighborMy, neighborBase + 8, 8) - 64;
+                if ((candidateX == 0 && candidateY == 0)
+                    || (candidateX == motionX && candidateY == motionY)
+                    || !motionInBounds(stride, height, x, y, candidateX, candidateY)) continue;
+                if (motionMatch(rgb, anchorPixels, stride, height, x, y,
+                    candidateX, candidateY, movingTolerance)) {
+                    dx = candidateX;
+                    dy = candidateY;
+                    matched = true;
+                }
+            }
+            if (!matched) return false;
+        }
+        if (reusePrevious) copyRecord(previous, data, mx, my, base);
+        put(data, mx, my, base, 8, dx + 64);
+        put(data, mx, my, base + 8, 8, dy + 64);
+        put(data, mx, my, base + 16, 8, 0);
+        putRaw(data, mx, my, 1736 + (base / RECORD_BITS) * 3 + 1, 2, 3);
+        return true;
+    }
+
+    /** Reconstruct the picture the fullscreen shaders retain, using the finalized tile carrier. */
+    public static void reconstructFullscreenTile(byte[] data, int[] anchorPixels, int[] reconstructed,
+                                                  int stride, int height, int originX, int originY) {
+        DecodeScratch scratch = DECODE_SCRATCH.get();
+        boolean anchorMarker = originX == 0 && originY == 0
+            && getSymbol(data, 7, 1, 255) == 97;
+        for (int by = 0; by < 32; by++) {
+            for (int bx = 0; bx < 32; bx++) {
+                int index = by * 32 + bx;
+                int mx = bx / 4, my = by / 4;
+                int base = ((by & 3) * 4 + (bx & 3)) * RECORD_BITS;
+                int mode = mode(data, mx, my, base);
+                scratch.mode[index] = mode;
+                if (mode == 3) {
+                    scratch.motionX[index] = get(data, mx, my, base, 8) - 64;
+                    scratch.motionY[index] = get(data, mx, my, base + 8, 8) - 64;
+                    continue;
+                }
+                scratch.low[index] = get(data, mx, my, base, 8);
+                scratch.high[index] = get(data, mx, my, base + 8, 8);
+                scratch.cb[index] = get(data, mx, my, base + 16, 8) - 128;
+                scratch.cr[index] = get(data, mx, my, base + 24, 8) - 128;
+                scratch.detail[index] = get(data, mx, my, base + 96, 13);
+                int detail = scratch.detail[index];
+                scratch.cbX[index] = signedGradient(detail & 7);
+                scratch.cbY[index] = signedGradient((detail >> 3) & 7);
+                scratch.crX[index] = signedGradient((detail >> 6) & 7);
+                scratch.crY[index] = signedGradient((detail >> 9) & 7);
+                if (mode == 2) {
+                    scratch.corner00[index] = get(data, mx, my, base + 32, 4);
+                    scratch.corner03[index] = get(data, mx, my, base + 36, 4);
+                    scratch.corner30[index] = get(data, mx, my, base + 40, 4);
+                    scratch.corner33[index] = get(data, mx, my, base + 44, 4);
+                }
+            }
+        }
+        for (int by = 0; by < 32; by++) {
+            for (int bx = 0; bx < 32; bx++) {
+                int index = by * 32 + bx;
+                for (int iy = 0; iy < 4; iy++) {
+                    int py = by * 4 + iy, y = originY + py;
+                    for (int ix = 0; ix < 4; ix++) {
+                        int px = bx * 4 + ix, x = originX + px;
+                        if (anchorMarker && px < 4 && py < 4) {
+                            reconstructed[y * stride + x] = 0;
+                            continue;
+                        }
+                        if (scratch.mode[index] == 3) {
+                            if (anchorPixels == null) throw new IllegalStateException("Temporal block without anchor");
+                            int sourceX = clamp(x + scratch.motionX[index], 0, stride - 1);
+                            int sourceY = clamp(y + scratch.motionY[index], 0, height - 1);
+                            reconstructed[y * stride + x] = anchorPixels[sourceY * stride + sourceX];
+                        } else {
+                            reconstructed[y * stride + x] = decodeFreshPixel(data, scratch, index, bx, by, px, py);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private static int decodeFreshPixel(byte[] data, DecodeScratch s, int index,
+                                        int bx, int by, int px, int py) {
+        int detail = s.detail[index];
+        float low = s.low[index], high = s.high[index];
+        float luma;
+        if (s.mode[index] == 1) {
+            luma = (low + high) * 0.5f;
+        } else if (s.mode[index] == 2) {
+            float a = selectorLuma(s.corner00[index], low, high, detail);
+            float b = selectorLuma(s.corner03[index], low, high, detail);
+            float c = selectorLuma(s.corner30[index], low, high, detail);
+            float d = selectorLuma(s.corner33[index], low, high, detail);
+            float x = (px & 3) / 3.0f, y = (py & 3) / 3.0f;
+            luma = (a + (b - a) * x) * (1.0f - y) + (c + (d - c) * x) * y;
+        } else {
+            int base = ((by & 3) * 4 + (bx & 3)) * RECORD_BITS;
+            int selector = get(data, bx / 4, by / 4, base + 32 + ((py & 3) * 4 + (px & 3)) * 4, 4);
+            luma = selectorLuma(selector, low, high, detail);
+        }
+
+        float cb = 0.0f, cr = 0.0f;
+        boolean blended = false;
+        if (high > 1.0f) {
+            int firstX = bx + ((px & 3) < 2 ? -1 : 0);
+            int firstY = by + ((py & 3) < 2 ? -1 : 0);
+            float fx = CHROMA_FRACTION[px & 3], fy = CHROMA_FRACTION[py & 3];
+            float sumCb = 0.0f, sumCr = 0.0f, total = 0.0f;
+            float guide = (low + high) * 0.5f;
+            float blendRange = guide < 72.0f || (detail & 4096) != 0 ? 32.0f : 20.0f;
+            for (int dy = 0; dy < 2; dy++) {
+                for (int dx = 0; dx < 2; dx++) {
+                    int neighborX = clamp(firstX + dx, 0, 31);
+                    int neighborY = clamp(firstY + dy, 0, 31);
+                    int neighbor = neighborY * 32 + neighborX;
+                    if (s.mode[neighbor] == 3) continue;
+                    float spatial = (dx == 0 ? 1.0f - fx : fx) * (dy == 0 ? 1.0f - fy : fy);
+                    float mean = (s.low[neighbor] + s.high[neighbor]) * 0.5f;
+                    float difference = Math.abs(mean - guide) / blendRange;
+                    float weight = spatial / (1.0f + 4.0f * difference * difference);
+                    float localX = Math.max(-2.0f, Math.min(2.0f, px + 0.5f - (neighborX * 4.0f + 2.0f)));
+                    float localY = Math.max(-2.0f, Math.min(2.0f, py + 0.5f - (neighborY * 4.0f + 2.0f)));
+                    sumCb += (s.cb[neighbor] + s.cbX[neighbor] * localX + s.cbY[neighbor] * localY) * weight;
+                    sumCr += (s.cr[neighbor] + s.crX[neighbor] * localX + s.crY[neighbor] * localY) * weight;
+                    total += weight;
+                }
+            }
+            if (total >= 0.0001f) {
+                cb = sumCb / total;
+                cr = sumCr / total;
+                blended = true;
+            }
+        }
+        if (!blended) {
+            float localX = px + 0.5f - (bx * 4.0f + 2.0f);
+            float localY = py + 0.5f - (by * 4.0f + 2.0f);
+            cb = s.cb[index] + s.cbX[index] * localX + s.cbY[index] * localY;
+            cr = s.cr[index] + s.crX[index] * localX + s.crY[index] * localY;
+        }
+        int red = Math.min(254, clamp(Math.round(luma + 1.402f * cr)));
+        int green = clamp(Math.round(luma - 0.344136f * cb - 0.714136f * cr));
+        int blue = clamp(Math.round(luma + 1.772f * cb));
+        return red << 16 | green << 8 | blue;
+    }
+
+    private static float selectorLuma(int selector, float low, float high, int detail) {
+        float fraction = selector / 15.0f;
+        if ((detail & 4096) != 0) fraction *= fraction;
+        return low + (high - low) * fraction;
+    }
+
+    private static boolean motionMatch(int[] current, int[] previous, int stride, int height,
+                                       int x, int y, int dx, int dy, int tolerance) {
+        if (!motionInBounds(stride, height, x, y, dx, dy)) return false;
+        int minRed = 255, maxRed = 0, minGreen = 255, maxGreen = 0, minBlue = 255, maxBlue = 0;
+        int largestDifference = 0;
+        for (int row = 0; row < 4; row++) {
+            for (int col = 0; col < 4; col++) {
+                int a = current[(y + row) * stride + x + col];
+                int b = previous[(y + row + dy) * stride + x + col + dx];
+                int red = (a >>> 16) & 255, green = (a >>> 8) & 255, blue = a & 255;
+                minRed = Math.min(minRed, red);
+                maxRed = Math.max(maxRed, red);
+                minGreen = Math.min(minGreen, green);
+                maxGreen = Math.max(maxGreen, green);
+                minBlue = Math.min(minBlue, blue);
+                maxBlue = Math.max(maxBlue, blue);
+                largestDifference = Math.max(largestDifference,
+                    Math.max(Math.abs(red - ((b >>> 16) & 255)),
+                        Math.max(Math.abs(green - ((b >>> 8) & 255)), Math.abs(blue - (b & 255)))));
+                if (largestDifference > tolerance) return false;
+            }
+        }
+        int localRange = Math.max(maxRed - minRed,
+            Math.max(maxGreen - minGreen, maxBlue - minBlue));
+        int allowed = localRange <= 20 ? Math.min(tolerance, 4)
+            : localRange <= 40 ? Math.min(tolerance, 8) : tolerance;
+        return largestDifference <= allowed;
+    }
+
+    private static boolean motionInBounds(int stride, int height, int x, int y, int dx, int dy) {
+        return x + dx >= 0 && x + dx + 4 <= stride && y + dy >= 0 && y + dy + 4 <= height;
+    }
+
+    public static boolean isFullscreenEncoded(byte[] bytes) {
+        if (bytes == null || bytes.length != TILE_SIZE * TILE_SIZE) return false;
+        for (int i = 0; i < 7; i++) {
+            if (getSymbol(bytes, i % 8, i / 8, 255) != MAGIC[i]) return false;
+        }
+        return getSymbol(bytes, 7, 0, 255) == 6;
+    }
+
+    public static boolean isFullscreenAnchor(byte[] bytes) {
+        return isFullscreenEncoded(bytes) && getSymbol(bytes, 7, 1, 255) == 97;
     }
 
     // Keep all endpoint/chroma precision. Compact modes only approximate luma,
@@ -436,5 +785,9 @@ public final class FilmCodec {
 
     private static int clamp(int value) {
         return Math.max(0, Math.min(255, value));
+    }
+
+    private static int clamp(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
     }
 }

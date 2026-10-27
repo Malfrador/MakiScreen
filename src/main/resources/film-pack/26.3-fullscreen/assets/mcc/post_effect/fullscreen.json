@@ -1,0 +1,40 @@
+{
+  "targets": {
+    "resolved": {"width": @FRAME_WIDTH@, "height": @FRAME_HEIGHT@},
+    "anchor": {"width": @FRAME_WIDTH@, "height": @FRAME_HEIGHT@, "persistent": true},
+    "anchor_next": {"width": @FRAME_WIDTH@, "height": @FRAME_HEIGHT@}
+  },
+  "passes": [
+    {
+      "vertex_shader": "minecraft:core/screenquad",
+      "fragment_shader": "mcc:post/fullscreen_decode",
+      "inputs": [
+        {"sampler_name": "Current", "target": "minecraft:main"},
+        {"sampler_name": "Anchor", "target": "anchor"}
+      ],
+      "output": "resolved"
+    },
+    {
+      "vertex_shader": "minecraft:core/screenquad",
+      "fragment_shader": "mcc:post/anchor_update",
+      "inputs": [
+        {"sampler_name": "Current", "target": "minecraft:main"},
+        {"sampler_name": "Resolved", "target": "resolved"},
+        {"sampler_name": "Anchor", "target": "anchor"}
+      ],
+      "output": "anchor_next"
+    },
+    {
+      "vertex_shader": "minecraft:core/screenquad",
+      "fragment_shader": "mcc:post/copy_current",
+      "inputs": [{"sampler_name": "In", "target": "anchor_next"}],
+      "output": "anchor"
+    },
+    {
+      "vertex_shader": "minecraft:core/screenquad",
+      "fragment_shader": "mcc:post/fullscreen_present",
+      "inputs": [{"sampler_name": "In", "target": "resolved"}],
+      "output": "minecraft:main"
+    }
+  ]
+}

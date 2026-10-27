@@ -44,6 +44,7 @@ public final class PlayRequestArgument implements CustomArgumentType.Converted<P
 
         boolean withAudio = false;
         boolean experimental = false;
+        boolean fullscreen = false;
         boolean explicitDither = false;
         boolean acceptTools = false;
         int chunkDurationMs = AudioManager.DEFAULT_CHUNK_DURATION_MS;
@@ -70,6 +71,8 @@ public final class PlayRequestArgument implements CustomArgumentType.Converted<P
                 acceptTools = true;
             } else if (token.equalsIgnoreCase("--experimental")) {
                 experimental = true;
+            } else if (token.equalsIgnoreCase("--fullscreen")) {
+                fullscreen = true;
             } else if (token.equalsIgnoreCase("--dither")) {
                 explicitDither = true;
                 if (i + 1 >= tokens.size()) {
@@ -93,7 +96,7 @@ public final class PlayRequestArgument implements CustomArgumentType.Converted<P
         }
 
         return new PlayRequest(input.trim(), source, withAudio, chunkDurationMs, ditheringMode,
-            experimental, acceptTools, List.copyOf(targetPlayerNames));
+            experimental, fullscreen, acceptTools, List.copyOf(targetPlayerNames));
     }
 
     @Override
@@ -136,7 +139,7 @@ public final class PlayRequestArgument implements CustomArgumentType.Converted<P
         } else if (previous.equalsIgnoreCase("--dither")) {
             candidates = new ArrayList<>(Arrays.stream(FrameProcessor.DitheringMode.values()).map(Enum::name).toList());
         } else {
-            candidates = new ArrayList<>(List.of("--audio", "--dither", "--experimental"));
+            candidates = new ArrayList<>(List.of("--audio", "--dither", "--experimental", "--fullscreen"));
         }
         if (!previous.equalsIgnoreCase("--dither")) {
             Bukkit.getOnlinePlayers().stream().map(Player::getName).forEach(candidates::add);

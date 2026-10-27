@@ -24,10 +24,13 @@ public class SeekCommand {
 
         long timeMs = Math.min(requestedTimeMs, player.getTotalDurationMs());
 
-        player.seekToTime(timeMs);
         sender.sendMessage(MM.deserialize(
-            "<yellow>⏩ Seeked to " + VideoPlayer.formatDuration(timeMs)
+            "<yellow>Seeking to " + VideoPlayer.formatDuration(timeMs) + "..."
         ));
+        player.seekToTime(timeMs, success -> sender.sendMessage(MM.deserialize(
+            success ? "<yellow>⏩ Seeked to " + VideoPlayer.formatDuration(timeMs)
+                : "<red>Seek failed. Check the server log."
+        )));
     }
 
 }

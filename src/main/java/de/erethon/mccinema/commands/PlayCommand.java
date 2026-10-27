@@ -49,9 +49,14 @@ public class PlayCommand {
         String fileName = request.source();
         final boolean withAudio = request.withAudio();
         final boolean experimental = request.experimental();
+        final boolean fullscreen = request.fullscreen();
+        if (fullscreen && (screen.getMapWidth() > 127 || screen.getMapHeight() > 127)) {
+            sender.sendMessage(Component.text("Fullscreen playback supports at most 127 maps per axis.", NamedTextColor.RED));
+            return;
+        }
         FrameProcessor.DitheringMode ditheringMode = request.ditheringMode();
-        if (experimental && plugin.getResourcePackManager() == null) {
-            sender.sendMessage(Component.text("Enable resourcepack.enabled before using --experimental.", NamedTextColor.RED));
+        if ((experimental || fullscreen) && plugin.getResourcePackManager() == null) {
+            sender.sendMessage(Component.text("Enable resourcepack.enabled before using --experimental or --fullscreen.", NamedTextColor.RED));
             return;
         }
         Set<UUID> targetPlayerIds = resolveTargetPlayers(request.targetPlayerNames(), sender);
@@ -63,7 +68,7 @@ public class PlayCommand {
             String continuationCommand = "/mcc play " + screenName + " " + request.rawInput() +
                 (request.acceptTools() ? "" : " --accept-tools");
             playLivestream(sender, screen, fileName, withAudio, ditheringMode, targetPlayerIds,
-                request.acceptTools(), continuationCommand, experimental);
+                request.acceptTools(), continuationCommand, experimental, fullscreen);
             return;
         }
 
@@ -93,12 +98,13 @@ public class PlayCommand {
         new BukkitRunnable() {
             @Override
             public void run() {
-                if (experimental) {
+                if (experimental || fullscreen) {
                     try {
-                        plugin.getFilmResourcePack().prepare();
+                        if (experimental && !fullscreen) plugin.getFilmResourcePack().prepare();
+                        if (fullscreen) plugin.getFilmResourcePack().prepareFullscreen(screen, experimental);
                     } catch (java.io.IOException failure) {
                         plugin.getServer().getScheduler().runTask(plugin, () -> sender.sendMessage(
-                            Component.text("Could not prepare film decoder: " + failure.getMessage(), NamedTextColor.RED)));
+                            Component.text("Could not prepare playback resource pack: " + failure.getMessage(), NamedTextColor.RED)));
                         return;
                     }
                 }
@@ -177,7 +183,8 @@ public class PlayCommand {
                         }
 
                         plugin.registerVideoPlayer(screen, player);
-                        if (experimental) player.enableExperimentalFilm(sender);
+                        if (experimental) player.enableExperimentalFilm(sender, fullscreen);
+                        else if (fullscreen) player.enableFullscreenMaps(sender);
 
                         player.setOnComplete(p -> {
                             stopProgressBar();
@@ -409,7 +416,8 @@ public class PlayCommand {
 
     private void playLivestream(CommandSender sender, Screen screen, String sourceUrl, boolean requestedAudio,
                                 FrameProcessor.DitheringMode ditheringMode, Set<UUID> targetPlayerIds,
-                                boolean acceptTools, String continuationCommand, boolean experimental) {
+                                boolean acceptTools, String continuationCommand, boolean experimental,
+                                boolean fullscreen) {
         YoutubeDownloadManager downloadManager = plugin.getYoutubeDownloadManager();
 
         if (acceptTools) {
@@ -428,7 +436,8 @@ public class PlayCommand {
         }
 
         if (downloadManager.isReady()) {
-            resolveAndLoadLivestream(sender, screen, sourceUrl, requestedAudio, ditheringMode, targetPlayerIds, experimental);
+            resolveAndLoadLivestream(sender, screen, sourceUrl, requestedAudio, ditheringMode,
+                targetPlayerIds, experimental, fullscreen);
             return;
         }
 
@@ -441,14 +450,15 @@ public class PlayCommand {
                     downloadManager.logYtDlpFailure("initialize media support", sourceUrl, error);
                     return;
                 }
-                resolveAndLoadLivestream(sender, screen, sourceUrl, requestedAudio, ditheringMode, targetPlayerIds, experimental);
+                resolveAndLoadLivestream(sender, screen, sourceUrl, requestedAudio, ditheringMode,
+                    targetPlayerIds, experimental, fullscreen);
             })
         );
     }
 
     private void resolveAndLoadLivestream(CommandSender sender, Screen screen, String sourceUrl,
                                           boolean requestedAudio, FrameProcessor.DitheringMode ditheringMode,
-                                          Set<UUID> targetPlayerIds, boolean experimental) {
+                                          Set<UUID> targetPlayerIds, boolean experimental, boolean fullscreen) {
         if (requestedAudio) {
             sender.sendMessage(MM.deserialize("<yellow>Live audio is not supported yet; playing the video stream only."));
         }
@@ -457,7 +467,8 @@ public class PlayCommand {
         plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
             VideoPlayer player = null;
             try {
-                if (experimental) plugin.getFilmResourcePack().prepare();
+                if (experimental && !fullscreen) plugin.getFilmResourcePack().prepare();
+                if (fullscreen) plugin.getFilmResourcePack().prepareFullscreen(screen, experimental);
                 LivestreamResolver resolver = new LivestreamResolver(plugin, plugin.getYoutubeDownloadManager());
                 LivestreamResolver.Livestream livestream = resolver.resolve(sourceUrl);
 
@@ -479,7 +490,7 @@ public class PlayCommand {
 
                 VideoPlayer loadedPlayer = player;
                 plugin.getServer().getScheduler().runTask(plugin, () -> activateLivestream(
-                    sender, screen, loadedPlayer, livestream, ditheringMode, experimental
+                    sender, screen, loadedPlayer, livestream, ditheringMode, experimental, fullscreen
                 ));
             } catch (Exception error) {
                 if (player != null) {
@@ -497,9 +508,11 @@ public class PlayCommand {
 
     private void activateLivestream(CommandSender sender, Screen screen, VideoPlayer player,
                                     LivestreamResolver.Livestream livestream,
-                                    FrameProcessor.DitheringMode ditheringMode, boolean experimental) {
+                                    FrameProcessor.DitheringMode ditheringMode, boolean experimental,
+                                    boolean fullscreen) {
         plugin.registerVideoPlayer(screen, player);
-        if (experimental) player.enableExperimentalFilm(sender);
+        if (experimental) player.enableExperimentalFilm(sender, fullscreen);
+        else if (fullscreen) player.enableFullscreenMaps(sender);
 
         player.setOnComplete(p -> {
             stopProgressBar();
