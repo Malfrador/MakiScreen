@@ -5,6 +5,7 @@ repositories {
     maven("https://repo.erethon.de/snapshots/")
     maven("https://eldonexus.de/repository/maven-public/")
     maven("https://jitpack.io")
+    maven("https://repo.viaversion.com")
     mavenCentral()
 }
 plugins {
@@ -16,7 +17,7 @@ plugins {
 }
 
 group = "cat.maki.makiscreen"
-version = "2.4.1"
+version = "2.5.0"
 
 java {
     toolchain.languageVersion.set(JavaLanguageVersion.of(25))
@@ -26,6 +27,7 @@ dependencies {
     paperweight.paperDevBundle("26.3.build.+")
     compileOnly("net.strokkur.commands:annotations-paper:2.3.0")
     annotationProcessor("net.strokkur.commands:processor-paper:2.3.0")
+    compileOnly("com.viaversion:viaversion-api:5.12.1")
     implementation("de.erethon:bedrock:1.5.18") { isTransitive = false }
     // FFmpeg
     implementation("org.bytedeco:javacv:1.5.10")
@@ -81,6 +83,7 @@ tasks {
         load = BukkitPluginDescription.PluginLoadOrder.STARTUP
         main = "de.erethon.mccinema.MCCinema"
         apiVersion = "26.2" // Lowest supported API version
+        softDepend = listOf("ViaVersion")
         authors = listOf("Maki", "Malfrador")
         name = "MCCinema"
         version = project.version.toString()
