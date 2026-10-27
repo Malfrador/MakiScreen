@@ -58,12 +58,20 @@ public class VideoPlayer {
     private String sourceName;
     private boolean liveStream;
     private volatile VideoTransform videoTransform = VideoTransform.DEFAULT;
-    private FFmpegFrameGrabber grabber;
+    private volatile FFmpegFrameGrabber grabber;
     private Java2DFrameConverter converter;
     private ScheduledExecutorService scheduler;
     private ScheduledFuture<?> playbackTask;
     private ScheduledExecutorService liveDecoderExecutor;
     private LiveStreamRefreshHandler liveStreamRefreshHandler;
+    private String liveStreamUrl;
+    private Map<String, String> liveStreamHeaders = Map.of();
+    private final Object liveDecoderLock = new Object();
+    private final AtomicLong liveDecoderEpoch = new AtomicLong();
+    private FFmpegFrameGrabber pendingLiveGrabber;
+    private Thread liveDecoderThread;
+    private boolean restartLiveDecoderWhenStopped;
+    private volatile boolean disposed;
 
     private final AtomicReference<State> state = new AtomicReference<>(State.IDLE);
     private final AtomicLong currentFrame = new AtomicLong(0);
@@ -187,8 +195,10 @@ public class VideoPlayer {
     }
 
     public boolean load(File videoFile) {
+        if (disposed) return false;
         if (state.get() == State.PLAYING) {
             stop();
+            return false;
         }
 
         this.videoFile = videoFile;
@@ -219,13 +229,17 @@ public class VideoPlayer {
     }
 
     public boolean loadLiveStream(String streamUrl, String displayName, Map<String, String> headers) {
+        if (disposed) return false;
         if (state.get() == State.PLAYING) {
             stop();
+            return false;
         }
 
         this.videoFile = null;
         this.sourceName = displayName;
         this.liveStream = true;
+        this.liveStreamUrl = streamUrl;
+        this.liveStreamHeaders = headers == null ? Map.of() : Map.copyOf(headers);
         this.videoTransform = VideoTransform.DEFAULT;
         state.set(State.LOADING);
         notifyStateChange();
@@ -259,6 +273,7 @@ public class VideoPlayer {
         liveGrabber.setOption("reconnect_streamed", "1");
         liveGrabber.setOption("reconnect_at_eof", "1");
         liveGrabber.setOption("reconnect_delay_max", "5");
+        liveGrabber.setOption("rw_timeout", "15000000");
         applyHttpHeaders(liveGrabber, headers);
         return liveGrabber;
     }
@@ -390,16 +405,17 @@ public class VideoPlayer {
     }
 
     public void play() {
-        if (grabber == null) {
-            plugin.getLogger().warning("No video loaded");
-            return;
-        }
+        if (disposed) return;
         State currentState = state.get();
         if (currentState == State.PLAYING) {
             return;
         }
         if (currentState == State.PAUSED) {
             resume();
+            return;
+        }
+        if (grabber == null) {
+            plugin.getLogger().warning("No video loaded");
             return;
         }
 
@@ -485,13 +501,10 @@ public class VideoPlayer {
         plugin.getLogger().info("Resumed playback from frame " + pausedAtFrame);
     }
 
-    public void stop() {
+    public synchronized void stop() {
+        if (disposed) return;
         if (filmGate != null) filmGate.cancel();
         State previousState = state.get();
-        if (previousState == State.STOPPED || previousState == State.IDLE) {
-            return; // Already stopped
-        }
-
         state.set(State.STOPPED);
         notifyStateChange();
 
@@ -502,6 +515,10 @@ public class VideoPlayer {
             playbackTask.cancel(false);
             playbackTask = null;
         }
+        if (scheduler != null) {
+            scheduler.shutdown();
+            scheduler = null;
+        }
         if (audioManager != null) {
             audioManager.stop();
         }
@@ -509,11 +526,10 @@ public class VideoPlayer {
 
         clearDebugActionBars();
 
-        try {
-            if (grabber != null && !liveStream) {
-                grabber.setFrameNumber(0);
-            }
-        } catch (Exception ignored) {}
+        disposed = true;
+        frameProcessor.shutdown();
+        closeGrabber();
+        screen.clearViewerCacheIfStopped();
         currentFrame.set(0);
         pausedSeekFrameRendered = false;
 
@@ -523,6 +539,18 @@ public class VideoPlayer {
 
         state.set(State.IDLE);
         notifyStateChange();
+    }
+
+    private void closeGrabber() {
+        FFmpegFrameGrabber oldGrabber = grabber;
+        grabber = null;
+        if (oldGrabber != null) {
+            try {
+                oldGrabber.close();
+            } catch (Exception e) {
+                plugin.getLogger().log(Level.WARNING, "Could not close video decoder", e);
+            }
+        }
     }
 
     public void seek(long frameNumber) {
@@ -782,26 +810,45 @@ public class VideoPlayer {
         if (liveDecoderRunning) {
             return;
         }
+        synchronized (liveDecoderLock) {
+            if (liveDecoderThread != null && liveDecoderThread.isAlive()) {
+                // Native reads may finish after close; never run two decoders at once.
+                restartLiveDecoderWhenStopped = true;
+                return;
+            }
+            restartLiveDecoderWhenStopped = false;
+        }
         liveDecoderRunning = true;
+        long epoch = liveDecoderEpoch.incrementAndGet();
         clearLiveFrameQueue();
         liveDecoderExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "MCCinema-LiveDecoder");
             t.setDaemon(true);
+            synchronized (liveDecoderLock) {
+                liveDecoderThread = t;
+            }
             return t;
         });
         liveDecoderExecutor.execute(() -> {
+            try {
             Java2DFrameConverter liveConverter = new Java2DFrameConverter();
             double nextOutputFrame = 0.0;
             long sourceFrameIndex = 0;
             int consecutiveFailures = 0;
             long nextRefreshAttemptNanos = 0L;
-            while (liveDecoderRunning) {
+            while (isLiveDecoderCurrent(epoch)) {
                 try {
-                    Frame frame = grabber.grabImage();
+                    FFmpegFrameGrabber decoder = grabber;
+                    if (decoder == null) {
+                        decoder = reopenLiveGrabber(epoch);
+                        if (decoder == null) break;
+                    }
+                    Frame frame = decoder.grabImage();
+                    if (!isLiveDecoderCurrent(epoch)) break;
                     if (frame == null || frame.image == null) {
                         consecutiveFailures++;
                         if (consecutiveFailures >= 20 && System.nanoTime() >= nextRefreshAttemptNanos) {
-                            if (refreshLiveStream()) {
+                            if (refreshLiveStream(epoch)) {
                                 consecutiveFailures = 0;
                                 nextRefreshAttemptNanos = 0L;
                                 nextOutputFrame = 0.0;
@@ -825,13 +872,14 @@ public class VideoPlayer {
                     nextOutputFrame += sourceFramesPerOutputFrame;
 
                     BufferedImage image = liveConverter.convert(frame);
-                    if (image != null) {
-                        enqueueLiveFrame(copyImage(image));
+                    if (image != null && isLiveDecoderCurrent(epoch)) {
+                        BufferedImage copy = copyImage(image);
+                        if (isLiveDecoderCurrent(epoch)) enqueueLiveFrame(copy);
                     }
                 } catch (Exception e) {
-                    if (liveDecoderRunning) {
+                    if (isLiveDecoderCurrent(epoch)) {
                         consecutiveFailures++;
-                        if (consecutiveFailures >= 3 && System.nanoTime() >= nextRefreshAttemptNanos && refreshLiveStream()) {
+                        if (consecutiveFailures >= 3 && System.nanoTime() >= nextRefreshAttemptNanos && refreshLiveStream(epoch)) {
                             consecutiveFailures = 0;
                             nextRefreshAttemptNanos = 0L;
                             nextOutputFrame = 0.0;
@@ -853,46 +901,126 @@ public class VideoPlayer {
                     }
                 }
             }
+            } finally {
+                boolean restart;
+                synchronized (liveDecoderLock) {
+                    liveDecoderThread = null;
+                    restart = restartLiveDecoderWhenStopped;
+                    restartLiveDecoderWhenStopped = false;
+                }
+                if (restart) {
+                    Bukkit.getScheduler().runTask(plugin, () -> {
+                        if (!disposed && state.get() == State.PLAYING) startLiveDecoder();
+                    });
+                }
+            }
         });
     }
 
-    private boolean refreshLiveStream() {
-        if (!liveDecoderRunning || liveStreamRefreshHandler == null) {
+    private boolean isLiveDecoderCurrent(long epoch) {
+        return liveDecoderRunning && liveDecoderEpoch.get() == epoch;
+    }
+
+    private FFmpegFrameGrabber reopenLiveGrabber(long epoch) throws Exception {
+        FFmpegFrameGrabber replacement = createLiveGrabber(liveStreamUrl, liveStreamHeaders);
+        try {
+            synchronized (liveDecoderLock) {
+                if (!isLiveDecoderCurrent(epoch)) return null;
+                pendingLiveGrabber = replacement;
+            }
+            replacement.start();
+            synchronized (liveDecoderLock) {
+                if (!isLiveDecoderCurrent(epoch)) return null;
+                grabber = replacement;
+                pendingLiveGrabber = null;
+            }
+            return replacement;
+        } finally {
+            synchronized (liveDecoderLock) {
+                if (pendingLiveGrabber == replacement) pendingLiveGrabber = null;
+            }
+            if (grabber != replacement) closeLiveGrabber(replacement);
+        }
+    }
+
+    private boolean refreshLiveStream(long epoch) {
+        if (!isLiveDecoderCurrent(epoch) || liveStreamRefreshHandler == null) {
             return false;
         }
+        FFmpegFrameGrabber replacement = null;
         try {
             plugin.getLogger().info("Refreshing expired or stalled livestream connection...");
             LiveStreamSource source = liveStreamRefreshHandler.refresh();
-            FFmpegFrameGrabber replacement = createLiveGrabber(source.streamUrl(), source.headers());
+            replacement = createLiveGrabber(source.streamUrl(), source.headers());
+            Map<String, String> refreshedHeaders = source.headers() == null ? Map.of() : Map.copyOf(source.headers());
+            synchronized (liveDecoderLock) {
+                if (!isLiveDecoderCurrent(epoch)) return false;
+                pendingLiveGrabber = replacement;
+            }
             replacement.start();
-            FFmpegFrameGrabber previous = grabber;
-            grabber = replacement;
             double refreshedFrameRate = replacement.getFrameRate();
-            if (refreshedFrameRate > 0 && refreshedFrameRate <= 120) {
-                sourceFrameRate = refreshedFrameRate;
-            }
-            try {
-                if (previous != null) {
-                    previous.close();
+            FFmpegFrameGrabber previous;
+            synchronized (liveDecoderLock) {
+                if (!isLiveDecoderCurrent(epoch)) return false;
+                previous = grabber;
+                grabber = replacement;
+                pendingLiveGrabber = null;
+                liveStreamUrl = source.streamUrl();
+                liveStreamHeaders = refreshedHeaders;
+                if (refreshedFrameRate > 0 && refreshedFrameRate <= 120) {
+                    sourceFrameRate = refreshedFrameRate;
                 }
-            } catch (Exception ignored) {
             }
+            replacement = null;
+            closeLiveGrabber(previous);
             clearLiveFrameQueue();
             plugin.getLogger().info("Livestream connection refreshed.");
             return true;
         } catch (Exception error) {
             plugin.getLogger().warning("Could not refresh livestream connection: " + error.getMessage());
             return false;
+        } finally {
+            if (replacement != null) {
+                synchronized (liveDecoderLock) {
+                    if (pendingLiveGrabber == replacement) pendingLiveGrabber = null;
+                }
+                closeLiveGrabber(replacement);
+            }
         }
     }
 
     private void stopLiveDecoder() {
         liveDecoderRunning = false;
+        liveDecoderEpoch.incrementAndGet();
+        synchronized (liveDecoderLock) {
+            restartLiveDecoderWhenStopped = false;
+        }
         if (liveDecoderExecutor != null) {
             liveDecoderExecutor.shutdownNow();
             liveDecoderExecutor = null;
         }
+        if (liveStream) {
+            FFmpegFrameGrabber previous;
+            FFmpegFrameGrabber pending;
+            synchronized (liveDecoderLock) {
+                previous = grabber;
+                grabber = null;
+                pending = pendingLiveGrabber;
+                pendingLiveGrabber = null;
+            }
+            closeLiveGrabber(previous);
+            if (pending != previous) closeLiveGrabber(pending);
+        }
         clearLiveFrameQueue();
+    }
+
+    private void closeLiveGrabber(FFmpegFrameGrabber decoder) {
+        if (decoder == null) return;
+        try {
+            decoder.close();
+        } catch (Exception e) {
+            plugin.getLogger().log(Level.WARNING, "Could not close livestream decoder", e);
+        }
     }
 
     private void enqueueLiveFrame(BufferedImage image) {
@@ -933,12 +1061,16 @@ public class VideoPlayer {
     }
 
     private void onVideoComplete() {
-        stop();
-        plugin.getScreenManager().fillScreenWithBlankColor(screen);
-        plugin.getLogger().info("Video playback complete");
-        if (onComplete != null) {
-            onComplete.accept(this);
-        }
+        if (!state.compareAndSet(State.PLAYING, State.STOPPED)) return;
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            stop();
+            if (plugin.getVideoPlayer(screen) != this) return;
+            plugin.getScreenManager().fillScreenWithBlankColor(screen);
+            plugin.getLogger().info("Video playback complete");
+            if (onComplete != null) {
+                onComplete.accept(this);
+            }
+        });
     }
 
     private void notifyStateChange() {
@@ -948,22 +1080,11 @@ public class VideoPlayer {
     }
 
     public void shutdown() {
-        if (filmGate != null) filmGate.cancel();
         stop();
         liveStreamRefreshHandler = null;
-        screen.stopViewerCacheUpdater();
-        frameProcessor.shutdown();
-        if (scheduler != null) {
-            scheduler.shutdown();
-        }
         if (audioManager != null) {
             audioManager.cleanup();
         }
-        try {
-            if (grabber != null) {
-                grabber.close();
-            }
-        } catch (Exception ignored) {}
     }
 
     public State getState() {

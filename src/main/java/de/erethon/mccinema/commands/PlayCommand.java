@@ -78,9 +78,9 @@ public class PlayCommand {
             return;
         }
 
-        // Stop existing player if any
+        // Release the previous decoder before opening another one.
         VideoPlayer existingPlayer = plugin.getVideoPlayer(screen);
-        if (existingPlayer != null && existingPlayer.getState() == VideoPlayer.State.PLAYING) {
+        if (existingPlayer != null) {
             existingPlayer.stop();
         }
 
@@ -171,6 +171,7 @@ public class PlayCommand {
                     @Override
                     public void run() {
                         if (!player.load(finalVideoFile)) {
+                            player.shutdown();
                             sender.sendMessage(MM.deserialize("<red>Failed to load video!"));
                             return;
                         }
@@ -497,10 +498,6 @@ public class PlayCommand {
     private void activateLivestream(CommandSender sender, Screen screen, VideoPlayer player,
                                     LivestreamResolver.Livestream livestream,
                                     FrameProcessor.DitheringMode ditheringMode, boolean experimental) {
-        VideoPlayer existingPlayer = plugin.getVideoPlayer(screen);
-        if (existingPlayer != null && existingPlayer != player) {
-            existingPlayer.shutdown();
-        }
         plugin.registerVideoPlayer(screen, player);
         if (experimental) player.enableExperimentalFilm(sender);
 

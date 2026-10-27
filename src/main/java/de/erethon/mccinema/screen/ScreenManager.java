@@ -339,6 +339,7 @@ public class ScreenManager {
         } else {
             dispatcher.dispatchFullFrame(screen, mapData, recipients);
         }
+        if (scheduleResends) screen.clearViewerCacheIfStopped();
         if (scheduleResends) {
             scheduleFullFrameDispatch(screen, 5L);
             scheduleFullFrameDispatch(screen, 20L);
@@ -366,6 +367,7 @@ public class ScreenManager {
             for (org.bukkit.entity.Player player : screen.getViewers()) {
                 dispatcher.sendLastFrameToPlayer(player, screen);
             }
+            screen.clearViewerCacheIfStopped();
         }, delayTicks);
     }
 

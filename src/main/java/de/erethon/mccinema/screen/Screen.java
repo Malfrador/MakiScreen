@@ -190,6 +190,12 @@ public class Screen implements ConfigurationSerializable {
         }
     }
 
+    public void clearViewerCacheIfStopped() {
+        if (viewerUpdateTaskId == -1) {
+            cachedViewers = Collections.emptyList();
+        }
+    }
+
     public boolean hasValidOrigin() {
         Location loc = getOrigin();
         return loc != null && loc.getWorld() != null;

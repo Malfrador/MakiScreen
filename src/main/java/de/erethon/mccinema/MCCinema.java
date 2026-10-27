@@ -210,7 +210,10 @@ public final class MCCinema extends EPlugin implements Listener {
     }
 
     public void registerVideoPlayer(Screen screen, VideoPlayer player) {
-        videoPlayers.put(screen.getId(), player);
+        VideoPlayer previous = videoPlayers.put(screen.getId(), player);
+        if (previous != null && previous != player) {
+            previous.shutdown();
+        }
     }
 
     public void unregisterVideoPlayer(Screen screen) {
